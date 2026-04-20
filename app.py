@@ -2,6 +2,7 @@ import os
 import asyncio
 import random
 import logging
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from google import genai
@@ -10,6 +11,9 @@ from aiogram.client.session.aiohttp import AiohttpSession
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+# Отключаем спам от сторонних библиотек
+logging.getLogger("google_genai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- КОНФИГУРАЦИЯ ---
 MODEL_PRIORITY = [
@@ -34,6 +38,18 @@ dp = Dispatcher()
 client = genai.Client(api_key=gemini_key)
 
 sessions = {}
+
+def format_for_telegram(text: str) -> str:
+    # Конвертируем Markdown от Gemini в поддерживаемый Telegram HTML
+    text = text.replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r'```(?:.*?)\n(.*?)\n?```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+    text = re.sub(r'```(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
+    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
+    text = re.sub(r'(?m)^\s*\*\s', '• ', text)
+    text = re.sub(r'(?m)^#+\s+(.*)', r'<b>\1</b>', text)
+    return text
 
 def update_history(chat_id, role, text):
     if chat_id not in sessions:
@@ -84,20 +100,25 @@ async def handle_message(message: types.Message):
             continue
 
     if final_text:
+        formatted_text = format_for_telegram(final_text)
+
         if "gemma" in used_model.lower():
-            final_text = f"⚠️ **{random.choice(GEMMA_PHRASES)}**\n\n{final_text}"
+            formatted_text = f"⚠️ <b>{random.choice(GEMMA_PHRASES)}</b>\n\n{formatted_text}"
 
         update_history(chat_id, "user", user_input)
         update_history(chat_id, "model", response_text_to_save)
 
-        if len(final_text) > 4000:
-            for i in range(0, len(final_text), 4000):
-                await message.answer(final_text[i:i+4000])
+        if len(formatted_text) > 4000:
+            for i in range(0, len(formatted_text), 4000):
+                try:
+                    await message.answer(formatted_text[i:i+4000], parse_mode="HTML")
+                except Exception:
+                    await message.answer(final_text[i:i+4000])
         else:
             try:
-                await message.answer(final_text, parse_mode="Markdown")
+                await message.answer(formatted_text, parse_mode="HTML")
             except Exception:
-                # Если Markdown кривой (LLM забыла закрыть тег), отправляем чистый текст
+                # Если HTML кривой, отправляем чистый текст
                 await message.answer(final_text)
     else:
         await message.answer("🤯 Перегрузка всех систем. Попробуй позже.")
