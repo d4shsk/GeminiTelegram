@@ -46,7 +46,7 @@ def update_history(chat_id, role, text):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("MegaMoZg на связи! Я работаю через Koyeb. Помню 30 сообщений. Сброс: /clear")
+    await message.answer("МегаМоZг на связи! Я могу упасть, так как дондолет захостил меня на железной дороге. Помню 30 сообщений. Сброс: /clear")
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
