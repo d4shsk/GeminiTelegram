@@ -49,6 +49,8 @@ else:
     groq_client = None
 
 sessions = {}
+active_models = {}
+
 
 def format_for_telegram(text: str) -> str:
     # Конвертируем Markdown от Gemini в поддерживаемый Telegram HTML
@@ -79,7 +81,8 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
     sessions.pop(message.chat.id, None)
-    await message.answer("🧹 Память очищена.")
+    active_models.pop(message.chat.id, None)
+    await message.answer("🧹 Память и настройки очищены.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -92,16 +95,26 @@ async def handle_message(message: types.Message):
     response_text_to_save = ""
     text_lower = user_input.lower()
     current_priority = list(MODEL_PRIORITY)
-    requested_name = None
     
-    # Динамическая маршрутизация
+    # Запоминаем выбор пользователя, если он явно позвал модель
     if "гемм" in text_lower or "gemma" in text_lower:
+        active_models[chat_id] = "gemma"
+    elif "лам" in text_lower or "llam" in text_lower:
+        active_models[chat_id] = "llama"
+    elif "гемин" in text_lower or "gemin" in text_lower:
+        active_models[chat_id] = "gemini"
+        
+    requested_name = None
+    saved_model = active_models.get(chat_id)
+    
+    # Динамическая маршрутизация на основе сохраненного или нового выбора
+    if saved_model == "gemma":
         requested_name = "Gemma"
         current_priority.sort(key=lambda x: "gemma" not in x["model"].lower())
-    elif "лам" in text_lower or "llam" in text_lower:
+    elif saved_model == "llama":
         requested_name = "Llama"
         current_priority.sort(key=lambda x: "llama" not in x["model"].lower())
-    elif "гемин" in text_lower or "gemin" in text_lower:
+    elif saved_model == "gemini":
         requested_name = "Gemini"
         current_priority.sort(key=lambda x: "gemini" not in x["model"].lower())
 
