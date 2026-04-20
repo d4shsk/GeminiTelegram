@@ -124,12 +124,23 @@ async def handle_message(message: types.Message):
                 # Конвертируем универсальную историю в формат Google GenAI
                 google_history = [{"role": msg["role"], "parts": [{"text": msg["text"]}]} for msg in sessions.get(chat_id, [])]
                 system_instruction = SYSTEM_PROMPT.format(my_name=my_name)
-                config = genai.types.GenerateContentConfig(system_instruction=system_instruction)
-                chat = client.aio.chats.create(model=model_id, config=config, history=google_history)
-                response = await asyncio.wait_for(
-                    chat.send_message(user_input),
-                    timeout=10.0
-                )
+                
+                if "gemma" in model_id.lower():
+                    # Gemma в Google API часто не поддерживает system_instruction, передаем текстом
+                    chat = client.aio.chats.create(model=model_id, history=google_history)
+                    current_input = f"[{system_instruction}]\n\nСообщение пользователя: {user_input}"
+                    response = await asyncio.wait_for(
+                        chat.send_message(current_input),
+                        timeout=10.0
+                    )
+                else:
+                    # Для Gemini используем штатный config
+                    config = genai.types.GenerateContentConfig(system_instruction=system_instruction)
+                    chat = client.aio.chats.create(model=model_id, config=config, history=google_history)
+                    response = await asyncio.wait_for(
+                        chat.send_message(user_input),
+                        timeout=10.0
+                    )
                 if response.text:
                     final_text = response.text
                     response_text_to_save = response.text
