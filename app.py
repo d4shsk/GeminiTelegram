@@ -61,15 +61,24 @@ async def handle_message(message: types.Message):
 
     final_text = None
     used_model = ""
+    response_text_to_save = ""
 
     for model_id in MODEL_PRIORITY:
         try:
-            chat = client.chats.create(model=model_id, history=sessions.get(chat_id, []))
-            response = chat.send_message(user_input)
+            # Асинхронный клиент + таймаут для быстрого переключения
+            chat = client.aio.chats.create(model=model_id, history=sessions.get(chat_id, []))
+            response = await asyncio.wait_for(
+                chat.send_message(user_input),
+                timeout=10.0 # Ждем 10 секунд, затем переходим к следующей модели
+            )
             if response.text:
                 final_text = response.text
+                response_text_to_save = response.text
                 used_model = model_id
                 break
+        except asyncio.TimeoutError:
+            logger.warning(f"⚠️ Таймаут: модель {model_id} думала слишком долго.")
+            continue
         except Exception as e:
             logger.warning(f"⚠️ Ошибка на {model_id}: {str(e)[:50]}")
             continue
@@ -79,13 +88,17 @@ async def handle_message(message: types.Message):
             final_text = f"⚠️ **{random.choice(GEMMA_PHRASES)}**\n\n{final_text}"
 
         update_history(chat_id, "user", user_input)
-        update_history(chat_id, "model", response.text)
+        update_history(chat_id, "model", response_text_to_save)
 
         if len(final_text) > 4000:
             for i in range(0, len(final_text), 4000):
                 await message.answer(final_text[i:i+4000])
         else:
-            await message.answer(final_text, parse_mode="Markdown")
+            try:
+                await message.answer(final_text, parse_mode="Markdown")
+            except Exception:
+                # Если Markdown кривой (LLM забыла закрыть тег), отправляем чистый текст
+                await message.answer(final_text)
     else:
         await message.answer("🤯 Перегрузка всех систем. Попробуй позже.")
 
