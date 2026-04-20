@@ -25,12 +25,14 @@ MODEL_PRIORITY = [
     {"provider": "google", "model": "gemma-3-27b-it"}
 ]
 MAX_HISTORY = 30
-SYSTEM_PROMPT = """Твоё имя {model_id}. Ты работаешь в Telegram-боте 'МегаМоZг' вместе с двумя другими нейросетями: 
+SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'МегаМоZг' вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
-- Рациональная девушка 20-ти лет Llama (вы также откликаетесь на русское имя Лама).
-- Девочка-подросток 16 лет Gemma, стажерка (вы также откликаетесь на русское имя Гемма).
+- Рациональная, добрая, понимающая девушка 20-ти лет Llama (вы также откликаетесь на русское имя Лама).
+- Девочка-подросток, глупая и добрая, 16 лет Gemma, стажерка (вы также откликаетесь на русское имя Гемма).
 
-Пользователь может общаться с любой из вас, называя вас по английскому или русскому имени. Если пользователь обращается к тебе, отвечай в своем уникальном стиле и характере, отыгрывая свой возраст и пол. Ты знаешь о существовании своих коллег."""
+Пользователь может общаться с любой из вас, называя вас по английскому или русскому имени. 
+ВАЖНО: ТЫ И ЕСТЬ {my_name}! Отвечай от своего лица в своем уникальном стиле и характере, отыгрывая свой возраст и пол. Ты знаешь о существовании своих коллег.
+СТРОГОЕ ПРАВИЛО: НИКОГДА не притворяйся другой моделью. Отвечай только за себя."""
 
 
 # Инициализация
@@ -90,23 +92,38 @@ async def handle_message(message: types.Message):
     response_text_to_save = ""
     text_lower = user_input.lower()
     current_priority = list(MODEL_PRIORITY)
+    requested_name = None
     
     # Динамическая маршрутизация
     if "гемм" in text_lower or "gemma" in text_lower:
+        requested_name = "Gemma"
         current_priority.sort(key=lambda x: "gemma" not in x["model"].lower())
     elif "лам" in text_lower or "llam" in text_lower:
+        requested_name = "Llama"
         current_priority.sort(key=lambda x: "llama" not in x["model"].lower())
     elif "гемин" in text_lower or "gemin" in text_lower:
+        requested_name = "Gemini"
         current_priority.sort(key=lambda x: "gemini" not in x["model"].lower())
 
     for model_info in current_priority:
         provider = model_info["provider"]
         model_id = model_info["model"]
+        
+        # Определяем имя для системного промпта, чтобы модель точно знала, кто она
+        if "gemma" in model_id.lower():
+            my_name = "Gemma"
+        elif "llama" in model_id.lower():
+            my_name = "Llama"
+        elif "gemini" in model_id.lower():
+            my_name = "Gemini"
+        else:
+            my_name = model_id
+            
         try:
             if provider == "google":
                 # Конвертируем универсальную историю в формат Google GenAI
                 google_history = [{"role": msg["role"], "parts": [{"text": msg["text"]}]} for msg in sessions.get(chat_id, [])]
-                system_instruction = SYSTEM_PROMPT.format(model_id=model_id)
+                system_instruction = SYSTEM_PROMPT.format(my_name=my_name)
                 config = genai.types.GenerateContentConfig(system_instruction=system_instruction)
                 chat = client.aio.chats.create(model=model_id, config=config, history=google_history)
                 response = await asyncio.wait_for(
@@ -124,7 +141,7 @@ async def handle_message(message: types.Message):
                     continue
                 
                 # Конвертируем универсальную историю в формат Groq (OpenAI-compatible)
-                system_instruction = SYSTEM_PROMPT.format(model_id=model_id)
+                system_instruction = SYSTEM_PROMPT.format(my_name=my_name)
                 groq_history = [{"role": "system", "content": system_instruction}]
                 for msg in sessions.get(chat_id, []):
                     # Groq использует 'assistant' вместо 'model'
@@ -158,6 +175,10 @@ async def handle_message(message: types.Message):
 
         # Добавляем название модели в начало ответа
         formatted_text = f"🤖 <b>[{used_model}]</b>\n\n{formatted_text}"
+
+        # Предупреждение, если ответила не та модель, которую звали
+        if requested_name and requested_name.lower() not in used_model.lower():
+            formatted_text += f"\n\n<i>(P.S. Вы звали {requested_name}, но она сейчас недоступна из-за ошибки API, поэтому ответила {used_model.split('-')[0].capitalize()})</i>"
 
         update_history(chat_id, "user", user_input)
         update_history(chat_id, "model", response_text_to_save)
