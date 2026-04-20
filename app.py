@@ -6,6 +6,7 @@ import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from google import genai
+from groq import AsyncGroq
 from aiogram.client.session.aiohttp import AiohttpSession
 
 # Настройка логов
@@ -17,25 +18,26 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- КОНФИГУРАЦИЯ ---
 MODEL_PRIORITY = [
-    "gemini-flash-latest", 
-    "gemini-2.5-flash", 
-    "gemini-2.0-flash", 
-    "gemma-3-27b-it"
+    {"provider": "google", "model": "gemini-flash-latest"},
+    {"provider": "google", "model": "gemini-2.5-flash"},
+    {"provider": "google", "model": "gemini-2.0-flash"},
+    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+    {"provider": "google", "model": "gemma-3-27b-it"}
 ]
 MAX_HISTORY = 30
-GEMMA_PHRASES = [
-    "Гемини ушёл распространять демократию, за пультом Гемма!",
-    "Старший брат спит, отдуваюсь я. Погнали!",
-    "Система перегружена, вызвали стажёра Гемму. Слушаю!"
-]
 
 # Инициализация
 tg_token = os.environ.get("TELEGRAM_TOKEN")
 gemini_key = os.environ.get("GEMINI_API_KEY")
+groq_key = os.environ.get("GROQ_API_KEY")
 
 bot = Bot(token=tg_token)
 dp = Dispatcher()
 client = genai.Client(api_key=gemini_key)
+if groq_key:
+    groq_client = AsyncGroq(api_key=groq_key)
+else:
+    groq_client = None
 
 sessions = {}
 
@@ -54,7 +56,8 @@ def format_for_telegram(text: str) -> str:
 def update_history(chat_id, role, text):
     if chat_id not in sessions:
         sessions[chat_id] = []
-    sessions[chat_id].append({"role": role, "parts": [{"text": text}]})
+    # Универсальный формат истории
+    sessions[chat_id].append({"role": role, "text": text})
     if len(sessions[chat_id]) > MAX_HISTORY:
         sessions[chat_id] = sessions[chat_id][-MAX_HISTORY:]
 
@@ -62,7 +65,7 @@ def update_history(chat_id, role, text):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("МегаМоZг на связи! Я могу упасть, так как дондолет захостил меня на железной дороге. Помню 30 сообщений. Сброс: /clear")
+    await message.answer("МегаМоZг на связи! Главная моя прелесть - никогда не знаешь, какая модель тебе ответит, умный Gemini, рациональная Llama или глупенькая Gemma. Помню 30 сообщений. Сброс: /clear")
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
@@ -79,31 +82,62 @@ async def handle_message(message: types.Message):
     used_model = ""
     response_text_to_save = ""
 
-    for model_id in MODEL_PRIORITY:
+    for model_info in MODEL_PRIORITY:
+        provider = model_info["provider"]
+        model_id = model_info["model"]
         try:
-            # Асинхронный клиент + таймаут для быстрого переключения
-            chat = client.aio.chats.create(model=model_id, history=sessions.get(chat_id, []))
-            response = await asyncio.wait_for(
-                chat.send_message(user_input),
-                timeout=10.0 # Ждем 10 секунд, затем переходим к следующей модели
-            )
-            if response.text:
-                final_text = response.text
-                response_text_to_save = response.text
-                used_model = model_id
-                break
+            if provider == "google":
+                # Конвертируем универсальную историю в формат Google GenAI
+                google_history = [{"role": msg["role"], "parts": [{"text": msg["text"]}]} for msg in sessions.get(chat_id, [])]
+                chat = client.aio.chats.create(model=model_id, history=google_history)
+                response = await asyncio.wait_for(
+                    chat.send_message(user_input),
+                    timeout=10.0
+                )
+                if response.text:
+                    final_text = response.text
+                    response_text_to_save = response.text
+                    used_model = model_id
+                    break
+            elif provider == "groq":
+                if not groq_client:
+                    logger.warning("⚠️ Не задан GROQ_API_KEY, пропускаем LLaMA")
+                    continue
+                
+                # Конвертируем универсальную историю в формат Groq (OpenAI-compatible)
+                groq_history = []
+                for msg in sessions.get(chat_id, []):
+                    # Groq использует 'assistant' вместо 'model'
+                    role = "assistant" if msg["role"] == "model" else msg["role"]
+                    groq_history.append({"role": role, "content": msg["text"]})
+                
+                # Добавляем текущее сообщение пользователя
+                groq_history.append({"role": "user", "content": user_input})
+                
+                response = await asyncio.wait_for(
+                    groq_client.chat.completions.create(
+                        model=model_id,
+                        messages=groq_history
+                    ),
+                    timeout=10.0
+                )
+                if response.choices and response.choices[0].message.content:
+                    final_text = response.choices[0].message.content
+                    response_text_to_save = final_text
+                    used_model = model_id
+                    break
         except asyncio.TimeoutError:
             logger.warning(f"⚠️ Таймаут: модель {model_id} думала слишком долго.")
             continue
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка на {model_id}: {str(e)[:50]}")
+            logger.warning(f"⚠️ Ошибка на {model_id} ({provider}): {str(e)[:50]}")
             continue
 
     if final_text:
         formatted_text = format_for_telegram(final_text)
 
-        if "gemma" in used_model.lower():
-            formatted_text = f"⚠️ <b>{random.choice(GEMMA_PHRASES)}</b>\n\n{formatted_text}"
+        # Добавляем название модели в начало ответа
+        formatted_text = f"🤖 <b>[{used_model}]</b>\n\n{formatted_text}"
 
         update_history(chat_id, "user", user_input)
         update_history(chat_id, "model", response_text_to_save)
