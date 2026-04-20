@@ -25,6 +25,13 @@ MODEL_PRIORITY = [
     {"provider": "google", "model": "gemma-3-27b-it"}
 ]
 MAX_HISTORY = 30
+SYSTEM_PROMPT = """Твоё имя {model_id}. Ты работаешь в Telegram-боте 'МегаМоZг' вместе с двумя другими нейросетями: 
+- Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
+- Рациональная девушка 20-ти лет Llama (вы также откликаетесь на русское имя Лама).
+- Девочка-подросток 16 лет Gemma, стажерка (вы также откликаетесь на русское имя Гемма).
+
+Пользователь может общаться с любой из вас, называя вас по английскому или русскому имени. Если пользователь обращается к тебе, отвечай в своем уникальном стиле и характере, отыгрывая свой возраст и пол. Ты знаешь о существовании своих коллег."""
+
 
 # Инициализация
 tg_token = os.environ.get("TELEGRAM_TOKEN")
@@ -81,15 +88,27 @@ async def handle_message(message: types.Message):
     final_text = None
     used_model = ""
     response_text_to_save = ""
+    text_lower = user_input.lower()
+    current_priority = list(MODEL_PRIORITY)
+    
+    # Динамическая маршрутизация
+    if "гемм" in text_lower or "gemma" in text_lower:
+        current_priority.sort(key=lambda x: "gemma" not in x["model"].lower())
+    elif "лам" in text_lower or "llam" in text_lower:
+        current_priority.sort(key=lambda x: "llama" not in x["model"].lower())
+    elif "гемин" in text_lower or "gemin" in text_lower:
+        current_priority.sort(key=lambda x: "gemini" not in x["model"].lower())
 
-    for model_info in MODEL_PRIORITY:
+    for model_info in current_priority:
         provider = model_info["provider"]
         model_id = model_info["model"]
         try:
             if provider == "google":
                 # Конвертируем универсальную историю в формат Google GenAI
                 google_history = [{"role": msg["role"], "parts": [{"text": msg["text"]}]} for msg in sessions.get(chat_id, [])]
-                chat = client.aio.chats.create(model=model_id, history=google_history)
+                system_instruction = SYSTEM_PROMPT.format(model_id=model_id)
+                config = genai.types.GenerateContentConfig(system_instruction=system_instruction)
+                chat = client.aio.chats.create(model=model_id, config=config, history=google_history)
                 response = await asyncio.wait_for(
                     chat.send_message(user_input),
                     timeout=10.0
@@ -105,7 +124,8 @@ async def handle_message(message: types.Message):
                     continue
                 
                 # Конвертируем универсальную историю в формат Groq (OpenAI-compatible)
-                groq_history = []
+                system_instruction = SYSTEM_PROMPT.format(model_id=model_id)
+                groq_history = [{"role": "system", "content": system_instruction}]
                 for msg in sessions.get(chat_id, []):
                     # Groq использует 'assistant' вместо 'model'
                     role = "assistant" if msg["role"] == "model" else msg["role"]
