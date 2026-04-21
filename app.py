@@ -1,4 +1,4 @@
-﻿import os
+import os
 import asyncio
 import random
 import logging
@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from google import genai
 from groq import AsyncGroq
 from aiogram.client.session.aiohttp import AiohttpSession
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
