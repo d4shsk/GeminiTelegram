@@ -26,10 +26,20 @@ MODEL_PRIORITY = [
     {"provider": "google", "model": "gemini-flash-latest"},
     {"provider": "google", "model": "gemini-2.5-flash"},
     {"provider": "google", "model": "gemini-2.0-flash"},
+    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
     {"provider": "groq", "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
     {"provider": "google", "model": "gemma-3-27b-it"}
 ]
 MAX_HISTORY = 30
+
+MODEL_RATING_TEXT = (
+    "\n\n🏆 <b>Рейтинг интеллекта:</b>\n"
+    "🥇 <code>gemini-2.5-flash</code> — лучшие бенчмарки, Google Search\n"
+    "🥈 <code>llama-3.3-70b-versatile</code> — 70B параметров, сильные рассуждения\n"
+    "🥉 <code>llama-4-scout-17b</code> — быстрая MoE, но меньше параметров\n"
+    "4️⃣ <code>gemini-2.0-flash</code> — чуть слабее 2.5\n"
+    "5️⃣ <code>gemma-3-27b-it</code> — напочатку норм"
+)
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'МегаМоZг' вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
 - Рациональная, добрая, понимающая девушка 20-ти лет Llama (вы также откликаетесь на русское имя Лама).
@@ -140,7 +150,11 @@ async def handle_mode_selection(callback: CallbackQuery):
             buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await callback.message.edit_text("✅ Выбран Серьезный режим!\nСистемный промпт отключен. Выберите предпочитаемую модель (при недоступности будет использована следующая по приоритету):", reply_markup=keyboard)
+        await callback.message.edit_text(
+            "✅ Выбран Серьезный режим!\nСистемный промпт отключен. Выберите предпочитаемую модель (при недоступности будет использована следующая по приоритету):" + MODEL_RATING_TEXT,
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
     await callback.answer()
 
 @dp.message(Command("model"))
@@ -155,7 +169,7 @@ async def cmd_model(message: types.Message):
         buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("Выберите модель:", reply_markup=keyboard)
+    await message.answer("Выберите модель:" + MODEL_RATING_TEXT, reply_markup=keyboard, parse_mode="HTML")
 
 @dp.callback_query(F.data.startswith("setmodel_"))
 async def handle_model_selection(callback: CallbackQuery):
