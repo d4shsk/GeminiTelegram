@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from google import genai
 from groq import AsyncGroq
 from aiogram.client.session.aiohttp import AiohttpSession
-from duckduckgo_search import AsyncDDGS
+from duckduckgo_search import DDGS
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
@@ -57,15 +57,17 @@ GROQ_TOOLS = [
     }
 ]
 
-async def perform_web_search(query: str) -> str:
+def sync_web_search(query: str) -> str:
     try:
-        async with AsyncDDGS() as ddgs:
-            results = await ddgs.text(query, max_results=3)
-            if not results:
-                return "Ничего не найдено."
-            return "\n".join([f"Название: {r['title']}\nОписание: {r['body']}\nСсылка: {r['href']}" for r in results])
+        results = DDGS().text(query, max_results=3)
+        if not results:
+            return "Ничего не найдено."
+        return "\n".join([f"Название: {r.get('title', '')}\nОписание: {r.get('body', '')}\nСсылка: {r.get('href', '')}" for r in results])
     except Exception as e:
         return f"Ошибка поиска: {str(e)}"
+
+async def perform_web_search(query: str) -> str:
+    return await asyncio.to_thread(sync_web_search, query)
 
 # Инициализация
 tg_token = os.environ.get("TELEGRAM_TOKEN")
