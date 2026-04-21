@@ -30,7 +30,7 @@ MODEL_PRIORITY = [
     {"provider": "groq",        "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
     {"provider": "google",      "model": "gemini-2.0-flash"},
     {"provider": "google",      "model": "gemma-3-27b-it"},
-    {"provider": "openrouter",  "model": "z-ai/glm-4.5-air:free", "serious_only": True},
+    {"provider": "openrouter",  "model": "minimax/minimax-m2.5:free", "serious_only": True},
 ]
 MAX_HISTORY = 30
 
@@ -39,7 +39,7 @@ MODEL_RATING_TEXT = (
     "🥇 <code>gemini-2.5-flash</code>, <code>llama-3.3-70b-versatile</code> — Лучшие бенчмарки, самые умные из представленных\n"
     "🥈 <code>gemini-2.0-flash</code>, <code>llama-4-scout-17b</code>  — Хорошие рассуждения, чуть слабее 2.5 и 3.3\n"
     "🥉 <code>gemma-3-27b-it</code> — Неплохая, забавная модель\n"
-    "🔬 <code>z-ai/glm-4.5-air</code> — Экспериментально: данные об этой модели ещё собираются\n"
+    "🔬 <code>minimax-m2.5</code> — Экспериментально: данные об этой модели ещё собираются\n"
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -182,7 +182,7 @@ async def handle_mode_selection(callback: CallbackQuery):
 
         model_buttons = []
         for model_info in MODEL_PRIORITY:
-            label = model_info["model"]
+            label = model_info["model"].replace(":free", "")
             if model_info.get("serious_only"):
                 label = "🔬 " + label
             model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
@@ -207,7 +207,7 @@ async def send_model_picker(target, chat_id: int):
     model_buttons = []
     for model_info in MODEL_PRIORITY:
         # serious_only-модели доступны только в этом меню (серьёзный режим)
-        label = model_info["model"]
+        label = model_info["model"].replace(":free", "")
         if model_info.get("serious_only"):
             label = "🔬 " + label
         model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
