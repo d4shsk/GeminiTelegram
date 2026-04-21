@@ -6,6 +6,7 @@ import re
 import json
 import io
 import base64
+import httpx
 from datetime import datetime
 import pytz
 from aiogram import Bot, Dispatcher, types, F
@@ -26,24 +27,22 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- КОНФИГУРАЦИЯ ---
 MODEL_PRIORITY = [
-    {"provider": "groq",    "model": "llama-3.3-70b-versatile"},
-    {"provider": "google",  "model": "gemini-flash-latest"},
-    {"provider": "google",  "model": "gemini-2.5-flash"},
-    {"provider": "groq",    "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
-    {"provider": "google",  "model": "gemini-2.0-flash"},
-    {"provider": "google",  "model": "gemma-3-27b-it"},
-    {"provider": "github",  "model": "gpt-4o", "serious_only": True},
+    {"provider": "groq",        "model": "llama-3.3-70b-versatile"},
+    {"provider": "google",      "model": "gemini-2.5-flash"},
+    {"provider": "google",      "model": "gemma-3-27b-it"},
+    {"provider": "cloudflare",  "model": "@cf/moonshotai/kimi-k2.6", "serious_only": True},
+    {"provider": "github",      "model": "gpt-4o", "serious_only": True},
 ]
 MAX_HISTORY = 30
 
 MODEL_RATING_TEXT = (
-    "\n\n🏆 <b>Рейтинг интеллекта:</b>\n"
-    "1. <code>gemini-2.5-flash</code>\n"
-    "2. <code>gpt-4o</code> - Воспринимает картинки\n"
-    "3. <code>llama-3.3-70b-versatile</code>\n"
-    "4. <code>gemini-2.0-flash</code>, <code>llama-4-scout-17b</code>\n"
+    "\n\n🏆 <b>Рейтинг моделей:</b>\n"
+    "1. <code>kimi-k2.6</code>\n"
+    "2. <code>gemini-2.5-flash</code>\n"
+    "3. <code>gpt-4o</code> — Видит картинки\n"
+    "4. <code>llama-3.3-70b-versatile</code>\n"
     "5. <code>gemma-3-27b-it</code>\n"
-    
+    "\n🎨 <code>/image &lt;запрос&gt;</code> — генерация картинок (FLUX)"
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -56,7 +55,7 @@ SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работа�
 
 Текущие дата и время (МСК): {current_datetime}"""
 
-GROQ_TOOLS = [
+SEARCH_TOOLS = [
     {
         "type": "function",
         "function": {
@@ -93,6 +92,8 @@ tg_token = os.environ.get("TELEGRAM_TOKEN")
 gemini_key = os.environ.get("GEMINI_API_KEY")
 groq_key = os.environ.get("GROQ_API_KEY")
 github_token = os.environ.get("GITHUB_TOKEN")
+cf_account_id = os.environ.get("CF_ACCOUNT_ID")
+cf_api_token = os.environ.get("CF_API_TOKEN")
 
 bot = Bot(token=tg_token)
 dp = Dispatcher()
@@ -108,6 +109,13 @@ if github_token:
     )
 else:
     github_ai_client = None
+if cf_account_id and cf_api_token:
+    cf_client = openai_lib.AsyncOpenAI(
+        api_key=cf_api_token,
+        base_url=f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/ai/v1",
+    )
+else:
+    cf_client = None
 
 sessions = {}
 active_models = {}
@@ -406,7 +414,7 @@ async def handle_message(message: types.Message):
                     groq_client.chat.completions.create(
                         model=model_id,
                         messages=groq_history,
-                        tools=GROQ_TOOLS,
+                        tools=SEARCH_TOOLS,
                         tool_choice="auto"
                     ),
                     timeout=15.0
@@ -438,8 +446,7 @@ async def handle_message(message: types.Message):
                             search_query = args.get("query", "")
                             logger.info(f"Groq tool call: search_internet for '{search_query}'")
                             search_result = await perform_web_search(search_query)
-
-                            print(f"DEBUG: Search results: {search_result}", flush=True)
+                            logger.info(f"Search results: {search_result[:200]}")
                             
                             groq_history.append({
                                 "role": "tool",
@@ -462,6 +469,74 @@ async def handle_message(message: types.Message):
                     final_text = response_message.content
                     response_text_to_save = final_text
                     used_model = model_id
+                    break
+
+            elif provider == "cloudflare":
+                if not cf_client:
+                    logger.warning("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, пропускаем Kimi")
+                    continue
+
+                tz_moscow = pytz.timezone("Europe/Moscow")
+                current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
+                cf_history = [{"role": "system", "content": f"Ты — умная языковая модель. Отвечай чётко и полезно. Текущие дата и время (МСК): {current_datetime}"}]
+                for msg in sessions.get(chat_id, []):
+                    role = "assistant" if msg["role"] == "model" else msg["role"]
+                    cf_history.append({"role": role, "content": msg["text"]})
+                cf_history.append({"role": "user", "content": user_input})
+
+                cf_response = await asyncio.wait_for(
+                    cf_client.chat.completions.create(
+                        model=model_id,
+                        messages=cf_history,
+                        tools=SEARCH_TOOLS,
+                        tool_choice="auto",
+                        max_tokens=2048,
+                    ),
+                    timeout=30.0
+                )
+
+                cf_message = cf_response.choices[0].message
+
+                if cf_message.tool_calls:
+                    tool_calls_dicts = []
+                    for tc in cf_message.tool_calls:
+                        tool_calls_dicts.append({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                        })
+                    cf_history.append({
+                        "role": "assistant",
+                        "content": cf_message.content,
+                        "tool_calls": tool_calls_dicts
+                    })
+                    for tool_call in cf_message.tool_calls:
+                        if tool_call.function.name == "search_internet":
+                            args = json.loads(tool_call.function.arguments)
+                            search_query = args.get("query", "")
+                            logger.info(f"Kimi tool call: search_internet for '{search_query}'")
+                            search_result = await perform_web_search(search_query)
+                            cf_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "content": search_result
+                            })
+                    cf_response2 = await asyncio.wait_for(
+                        cf_client.chat.completions.create(
+                            model=model_id,
+                            messages=cf_history,
+                            max_tokens=2048,
+                        ),
+                        timeout=30.0
+                    )
+                    cf_message = cf_response2.choices[0].message
+
+                cf_text = (cf_message.content or "").strip()
+                if cf_text:
+                    final_text = cf_text
+                    response_text_to_save = cf_text
+                    used_model = "kimi-k2.6"
                     break
 
             elif provider == "github":
@@ -490,12 +565,52 @@ async def handle_message(message: types.Message):
                     github_ai_client.chat.completions.create(
                         model=model_id,
                         messages=gh_history,
+                        tools=SEARCH_TOOLS,
+                        tool_choice="auto",
                         max_tokens=1024,
                         temperature=0.3,
                     ),
                     timeout=30.0
                 )
-                gh_text = (gh_response.choices[0].message.content or "").strip()
+                gh_message = gh_response.choices[0].message
+
+                if gh_message.tool_calls:
+                    tool_calls_dicts = []
+                    for tc in gh_message.tool_calls:
+                        tool_calls_dicts.append({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
+                        })
+                    gh_history.append({
+                        "role": "assistant",
+                        "content": gh_message.content,
+                        "tool_calls": tool_calls_dicts
+                    })
+                    for tool_call in gh_message.tool_calls:
+                        if tool_call.function.name == "search_internet":
+                            args = json.loads(tool_call.function.arguments)
+                            search_query = args.get("query", "")
+                            logger.info(f"GPT-4o tool call: search_internet for '{search_query}'")
+                            search_result = await perform_web_search(search_query)
+                            gh_history.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "content": search_result
+                            })
+                    gh_response2 = await asyncio.wait_for(
+                        github_ai_client.chat.completions.create(
+                            model=model_id,
+                            messages=gh_history,
+                            max_tokens=1024,
+                            temperature=0.3,
+                        ),
+                        timeout=30.0
+                    )
+                    gh_message = gh_response2.choices[0].message
+
+                gh_text = (gh_message.content or "").strip()
                 if gh_text:
                     final_text = gh_text
                     response_text_to_save = gh_text
@@ -637,6 +752,55 @@ async def handle_photo(message: types.Message):
     except Exception as e:
         logger.warning(f"⚠️ Ошибка Vision gpt-4o: {str(e)[:100]}")
         await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
+
+# --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (FLUX) ---
+
+async def generate_image_cf(prompt: str) -> bytes | None:
+    """Генерирует изображение через Cloudflare flux-1-schnell. Возвращает PNG байты."""
+    if not (cf_account_id and cf_api_token):
+        return None
+    url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    headers = {"Authorization": f"Bearer {cf_api_token}"}
+    payload = {"prompt": prompt}
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        resp = await http.post(url, headers=headers, json=payload)
+        if resp.status_code == 200:
+            ct = resp.headers.get("content-type", "")
+            if "image" in ct:
+                return resp.content
+            # Cloudflare может вернуть JSON с base64
+            try:
+                data = resp.json()
+                b64 = (data.get("result") or {}).get("image") or data.get("image")
+                if b64:
+                    return base64.b64decode(b64)
+            except Exception:
+                pass
+        logger.warning(f"⚠️ Flux ошибка {resp.status_code}: {resp.text[:200]}")
+        return None
+
+@dp.message(Command("image"))
+async def cmd_image(message: types.Message):
+    """Генерирует изображение по тексту через FLUX-1-schnell (Cloudflare)."""
+    prompt = message.text.partition(" ")[2].strip()
+    if not prompt:
+        await message.answer("✏️ Укажи запрос после команды, например:\n<code>/image закат над горами</code>", parse_mode="HTML")
+        return
+    if not (cf_account_id and cf_api_token):
+        await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, генерация недоступна.")
+        return
+    await bot.send_chat_action(message.chat.id, "upload_photo")
+    img_bytes = await generate_image_cf(prompt)
+    if img_bytes:
+        buf = io.BytesIO(img_bytes)
+        buf.name = "image.png"
+        await message.answer_photo(
+            types.BufferedInputFile(buf.getvalue(), filename="image.png"),
+            caption=f"🎨 <b>FLUX-1-schnell</b>\n<i>{prompt[:200]}</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Не удалось сгенерировать изображение. Попробуй позже.")
 
 # --- ЗАПУСК ---
 async def main():
