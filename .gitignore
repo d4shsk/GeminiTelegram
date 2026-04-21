@@ -1,6 +1,6 @@
 # Тестовые файлы с ключами
 test_groq.py
-test_zai.py
+test_github.py
 test_gpt.py
 
 # Python

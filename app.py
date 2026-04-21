@@ -4,6 +4,8 @@ import random
 import logging
 import re
 import json
+import io
+import base64
 from datetime import datetime
 import pytz
 from aiogram import Bot, Dispatcher, types, F
@@ -24,22 +26,24 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- КОНФИГУРАЦИЯ ---
 MODEL_PRIORITY = [
-    {"provider": "groq",        "model": "llama-3.3-70b-versatile"},
-    {"provider": "google",      "model": "gemini-flash-latest"},
-    {"provider": "google",      "model": "gemini-2.5-flash"},
-    {"provider": "groq",        "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
-    {"provider": "google",      "model": "gemini-2.0-flash"},
-    {"provider": "google",      "model": "gemma-3-27b-it"},
-    {"provider": "openrouter",  "model": "minimax/minimax-m2.5:free", "serious_only": True},
+    {"provider": "groq",    "model": "llama-3.3-70b-versatile"},
+    {"provider": "google",  "model": "gemini-flash-latest"},
+    {"provider": "google",  "model": "gemini-2.5-flash"},
+    {"provider": "groq",    "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
+    {"provider": "google",  "model": "gemini-2.0-flash"},
+    {"provider": "google",  "model": "gemma-3-27b-it"},
+    {"provider": "github",  "model": "gpt-4o", "serious_only": True},
 ]
 MAX_HISTORY = 30
 
 MODEL_RATING_TEXT = (
     "\n\n🏆 <b>Рейтинг интеллекта:</b>\n"
-    "🥇 <code>gemini-2.5-flash</code>, <code>llama-3.3-70b-versatile</code> — Лучшие бенчмарки, самые умные из представленных\n"
-    "🥈 <code>gemini-2.0-flash</code>, <code>llama-4-scout-17b</code>  — Хорошие рассуждения, чуть слабее 2.5 и 3.3\n"
-    "🥉 <code>gemma-3-27b-it</code> — Неплохая, забавная модель\n"
-    "🔬 <code>minimax-m2.5</code> — Экспериментально: данные об этой модели ещё собираются\n"
+    "1. <code>gemini-2.5-flash</code>\n"
+    "2. <code>gpt-4o</code> - Воспринимает картинки\n"
+    "3. <code>llama-3.3-70b-versatile</code>\n"
+    "4. <code>gemini-2.0-flash</code>, <code>llama-4-scout-17b</code>\n"
+    "5. <code>gemma-3-27b-it</code>\n"
+    
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -88,7 +92,7 @@ async def perform_web_search(query: str) -> str:
 tg_token = os.environ.get("TELEGRAM_TOKEN")
 gemini_key = os.environ.get("GEMINI_API_KEY")
 groq_key = os.environ.get("GROQ_API_KEY")
-openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+github_token = os.environ.get("GITHUB_TOKEN")
 
 bot = Bot(token=tg_token)
 dp = Dispatcher()
@@ -97,14 +101,13 @@ if groq_key:
     groq_client = AsyncGroq(api_key=groq_key)
 else:
     groq_client = None
-if openrouter_key:
-    openrouter_client = openai_lib.AsyncOpenAI(
-        api_key=openrouter_key,
-        base_url="https://openrouter.ai/api/v1",
-        default_headers={"HTTP-Referer": "https://localhost", "X-Title": "DummyLLM"},
+if github_token:
+    github_ai_client = openai_lib.AsyncOpenAI(
+        api_key=github_token,
+        base_url="https://models.inference.ai.azure.com",
     )
 else:
-    openrouter_client = None
+    github_ai_client = None
 
 sessions = {}
 active_models = {}
@@ -461,16 +464,16 @@ async def handle_message(message: types.Message):
                     used_model = model_id
                     break
 
-            elif provider == "openrouter":
-                if not openrouter_client:
-                    logger.warning("⚠️ Не задан OPENROUTER_API_KEY, пропускаем OpenRouter-модель")
+            elif provider == "github":
+                if not github_ai_client:
+                    logger.warning("⚠️ Не задан GITHUB_TOKEN, пропускаем GitHub Models")
                     continue
 
                 # Собираем историю в формате OpenAI
-                or_history = []
+                gh_history = []
                 tz_moscow = pytz.timezone("Europe/Moscow")
                 current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
-                or_history.append({
+                gh_history.append({
                     "role": "system",
                     "content": (
                         "Ты — умная языковая модель. Отвечай чётко, думай аналитически, "
@@ -480,22 +483,22 @@ async def handle_message(message: types.Message):
                 })
                 for msg in sessions.get(chat_id, []):
                     role = "assistant" if msg["role"] == "model" else msg["role"]
-                    or_history.append({"role": role, "content": msg["text"]})
-                or_history.append({"role": "user", "content": user_input})
+                    gh_history.append({"role": role, "content": msg["text"]})
+                gh_history.append({"role": "user", "content": user_input})
 
-                or_response = await asyncio.wait_for(
-                    openrouter_client.chat.completions.create(
+                gh_response = await asyncio.wait_for(
+                    github_ai_client.chat.completions.create(
                         model=model_id,
-                        messages=or_history,
+                        messages=gh_history,
                         max_tokens=1024,
                         temperature=0.3,
                     ),
                     timeout=30.0
                 )
-                or_text = (or_response.choices[0].message.content or "").strip()
-                if or_text:
-                    final_text = or_text
-                    response_text_to_save = or_text
+                gh_text = (gh_response.choices[0].message.content or "").strip()
+                if gh_text:
+                    final_text = gh_text
+                    response_text_to_save = gh_text
                     used_model = model_id
                     break
                     
@@ -554,6 +557,86 @@ async def handle_message(message: types.Message):
                 await message.answer(final_text)
     else:
         await message.answer("🤯 Перегрузка всех систем. Попробуй позже.")
+
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    """Обработчик фото — видение через gpt-4o (GitHub Models)."""
+    chat_id = message.chat.id
+    mode = user_modes.get(chat_id, "worker")
+
+    if mode != "serious":
+        await message.answer("📷 Отправка картинок доступна только в Серьёзном режиме с выбранной моделью gpt-4o.")
+        return
+
+    selected_model = user_models.get(chat_id, "")
+    if selected_model != "gpt-4o":
+        await message.answer("📷 Отправка картинок работает только с моделью <code>gpt-4o</code>. Смените модель через 🤖 Сменить модель.", parse_mode="HTML")
+        return
+
+    if not github_ai_client:
+        await message.answer("⚠️ Не задан GITHUB_TOKEN, зрение недоступно.")
+        return
+
+    await bot.send_chat_action(chat_id, "typing")
+
+    # Скачиваем крупнейшее фото (file_id последнее = максимальное разрешение)
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buf = io.BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    caption = message.caption or "Что на этом изображении? Опиши подробно."
+
+    try:
+        tz_moscow = pytz.timezone("Europe/Moscow")
+        current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
+        gh_response = await asyncio.wait_for(
+            github_ai_client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Отвечай на русском языке. Описывай изображение подробно и чётко. "
+                            f"Текущие дата и время (МСК): {current_datetime}"
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": caption},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_b64}",
+                                    "detail": "high"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=1024,
+                temperature=0.3,
+            ),
+            timeout=45.0
+        )
+        answer = (gh_response.choices[0].message.content or "").strip()
+        if answer:
+            formatted = format_for_telegram(answer)
+            formatted = f"🤖 <b>[gpt-4o]</b> 📂 [Vision]\n\n{formatted}"
+            try:
+                await message.answer(formatted, parse_mode="HTML")
+            except Exception:
+                await message.answer(answer)
+        else:
+            await message.answer("🤔 Модель не смогла дать ответ на это изображение.")
+    except asyncio.TimeoutError:
+        await message.answer("⏱ Обработка изображения заняла слишком много времени. Попробуй ещё раз.")
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка Vision gpt-4o: {str(e)[:100]}")
+        await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
 
 # --- ЗАПУСК ---
 async def main():
