@@ -331,6 +331,8 @@ async def handle_message(message: types.Message):
                             search_query = args.get("query", "")
                             logger.info(f"Groq tool call: search_internet for '{search_query}'")
                             search_result = await perform_web_search(search_query)
+
+                            print(f"DEBUG: Search results: {search_result}", flush=True)
                             
                             groq_history.append({
                                 "role": "tool",
@@ -344,7 +346,6 @@ async def handle_message(message: types.Message):
                         groq_client.chat.completions.create(
                             model=model_id,
                             messages=groq_history,
-                            tools=GROQ_TOOLS
                         ),
                         timeout=15.0
                     )
