@@ -8,7 +8,7 @@ from datetime import datetime
 import pytz
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from google import genai
 from groq import AsyncGroq
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -124,36 +124,76 @@ def update_history(chat_id, role, text):
 
 # --- ОБРАБОТЧИКИ ---
 
+def get_main_menu() -> ReplyKeyboardMarkup:
+    """Постоянное нижнее меню, доступное всегда."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔄 Сменить режим"), KeyboardButton(text="🤖 Сменить модель")],
+            [KeyboardButton(text="🧹 Очистить историю")]
+        ],
+        resize_keyboard=True
+    )
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    inline_kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Шуточный режим (RolePlay)🤪", callback_data="mode_worker")],
         [InlineKeyboardButton(text="Серьезный режим 🧐", callback_data="mode_serious")]
     ])
-    await message.answer("Выберите режим работы бота: \n1. Шуточный режим. Нейросети думают, что они реальные люди и работают в телеграмм боте. \n2. Серьезный режим. Нейросети отвечают стандартно.", reply_markup=keyboard)
+    await message.answer(
+        "Выберите режим работы бота:\n"
+        "1. Шуточный режим. Нейросети думают, что они реальные люди и работают в телеграмм боте.\n"
+        "2. Серьезный режим. Нейросети отвечают стандартно.",
+        reply_markup=inline_kb
+    )
 
 @dp.callback_query(F.data.startswith("mode_"))
 async def handle_mode_selection(callback: CallbackQuery):
     mode = callback.data.split("_")[1]
     chat_id = callback.message.chat.id
     user_modes[chat_id] = mode
-    
+
+    # Очищаем историю при смене режима
+    sessions.pop(chat_id, None)
+    active_models.pop(chat_id, None)
+
     if mode == "worker":
-        await callback.message.edit_text("✅ Выбран режим RolePlay!\nГлавная моя прелесть - никогда не знаешь, какая модель тебе ответит, умный Gemini, рациональная Llama или глупенькая Gemma. Помню 30 сообщений. Сброс: /clear")
+        await callback.message.edit_text(
+            "✅ Выбран режим RolePlay!\n"
+            "Никогда не знаешь, какая модель ответит: умный Gemini, рациональная Llama или глупенькая Gemma.\n"
+            "История очищена. Помню до 30 сообщений."
+        )
+        # Показываем постоянное меню отдельным сообщением
+        await callback.message.answer("Меню всегда под рукой 👇", reply_markup=get_main_menu())
     else:
         user_models[chat_id] = "gemini-2.5-flash"
-        
-        buttons = []
+
+        model_buttons = []
         for model_info in MODEL_PRIORITY:
-            buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
-        
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            model_buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
+
+        inline_kb = InlineKeyboardMarkup(inline_keyboard=model_buttons)
         await callback.message.edit_text(
-            "✅ Выбран Серьезный режим!\nСистемный промпт отключен. Выберите предпочитаемую модель (при недоступности будет использована следующая по приоритету):" + MODEL_RATING_TEXT,
-            reply_markup=keyboard,
+            "✅ Выбран Серьезный режим! История очищена.\n"
+            "Системный промпт отключен. Выберите предпочитаемую модель (при недоступности будет использована следующая по приоритету):"
+            + MODEL_RATING_TEXT,
+            reply_markup=inline_kb,
             parse_mode="HTML"
         )
+        # Показываем постоянное меню отдельным сообщением
+        await callback.message.answer("Меню всегда под рукой 👇", reply_markup=get_main_menu())
     await callback.answer()
+
+def show_model_picker_text() -> str:
+    return "Выберите модель:" + MODEL_RATING_TEXT
+
+async def send_model_picker(target, chat_id: int):
+    """Отправляет меню выбора модели. target — message или callback.message."""
+    model_buttons = []
+    for model_info in MODEL_PRIORITY:
+        model_buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
+    inline_kb = InlineKeyboardMarkup(inline_keyboard=model_buttons)
+    await target.answer(show_model_picker_text(), reply_markup=inline_kb, parse_mode="HTML")
 
 @dp.message(Command("model"))
 async def cmd_model(message: types.Message):
@@ -161,13 +201,7 @@ async def cmd_model(message: types.Message):
     if user_modes.get(chat_id) != "serious":
         await message.answer("Команда /model доступна только в Серьезном режиме. Выберите режим через /start")
         return
-        
-    buttons = []
-    for model_info in MODEL_PRIORITY:
-        buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
-    
-    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await message.answer("Выберите модель:" + MODEL_RATING_TEXT, reply_markup=keyboard, parse_mode="HTML")
+    await send_model_picker(message, chat_id)
 
 @dp.callback_query(F.data.startswith("setmodel_"))
 async def handle_model_selection(callback: CallbackQuery):
@@ -181,13 +215,40 @@ async def cmd_clear(message: types.Message):
     chat_id = message.chat.id
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
-    await message.answer("🧹 Память и настройки переписки очищены.")
+    await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
     chat_id = message.chat.id
     user_input = message.text
     mode = user_modes.get(chat_id, "worker")
+
+    # --- Обработка кнопок постоянного меню ---
+    if user_input == "🔄 Сменить режим":
+        inline_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Шуточный режим (RolePlay)🤪", callback_data="mode_worker")],
+            [InlineKeyboardButton(text="Серьезный режим 🧐", callback_data="mode_serious")]
+        ])
+        await message.answer(
+            "Выберите режим работы бота:\n"
+            "1. Шуточный режим. Нейросети думают, что они реальные люди и работают в телеграмм боте.\n"
+            "2. Серьезный режим. Нейросети отвечают стандартно.",
+            reply_markup=inline_kb
+        )
+        return
+
+    if user_input == "🤖 Сменить модель":
+        if mode != "serious":
+            await message.answer("Выбор модели доступен только в Серьезном режиме. Сначала выберите режим через 🔄 Сменить режим.")
+        else:
+            await send_model_picker(message, chat_id)
+        return
+
+    if user_input == "🧹 Очистить историю":
+        sessions.pop(chat_id, None)
+        active_models.pop(chat_id, None)
+        await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
+        return
     
     await bot.send_chat_action(chat_id, "typing")
 
