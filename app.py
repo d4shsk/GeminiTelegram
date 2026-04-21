@@ -1,4 +1,4 @@
-import os
+﻿import os
 import asyncio
 import random
 import logging
@@ -24,7 +24,7 @@ MODEL_PRIORITY = [
     {"provider": "google", "model": "gemini-flash-latest"},
     {"provider": "google", "model": "gemini-2.5-flash"},
     {"provider": "google", "model": "gemini-2.0-flash"},
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+    {"provider": "groq", "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
     {"provider": "google", "model": "gemma-3-27b-it"}
 ]
 MAX_HISTORY = 30
@@ -321,7 +321,7 @@ async def handle_message(message: types.Message):
                     
                     groq_history.append({
                         "role": "assistant",
-                        "content": response_message.content or "",
+                        "content": response_message.content,
                         "tool_calls": tool_calls_dicts
                     })
                     
@@ -360,8 +360,28 @@ async def handle_message(message: types.Message):
             logger.warning(f"⚠️ Таймаут: модель {model_id} думала слишком долго.")
             continue
         except Exception as e:
-            logger.warning(f"⚠️ Ошибка на {model_id} ({provider}): {str(e)[:50]}")
-            continue
+            if "tool_use_failed" in str(e):
+                logger.warning("⚠️ Ошибка парсинга инструмента Groq, повторяем без интернета...")
+                try:
+                    response = await asyncio.wait_for(
+                        groq_client.chat.completions.create(
+                            model=model_id,
+                            messages=groq_history
+                        ),
+                        timeout=15.0
+                    )
+                    response_message = response.choices[0].message
+                    if response_message and response_message.content:
+                        final_text = response_message.content
+                        response_text_to_save = final_text
+                        used_model = model_id
+                        break
+                except Exception as ex:
+                    logger.warning(f"⚠️ Ошибка повторного вызова {model_id}: {str(ex)[:50]}")
+                    continue
+            else:
+                logger.warning(f"⚠️ Ошибка на {model_id} ({provider}): {str(e)[:50]}")
+                continue
 
     if final_text:
         formatted_text = format_for_telegram(final_text)

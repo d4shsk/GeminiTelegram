@@ -1,0 +1,14 @@
+# Тестовые файлы с ключами
+test_groq.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Переменные окружения
+.env
+*.env
