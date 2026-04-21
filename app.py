@@ -23,24 +23,22 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- КОНФИГУРАЦИЯ ---
 MODEL_PRIORITY = [
+    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
     {"provider": "google", "model": "gemini-flash-latest"},
     {"provider": "google", "model": "gemini-2.5-flash"},
-    {"provider": "google", "model": "gemini-2.0-flash"},
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
     {"provider": "groq", "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
+    {"provider": "google", "model": "gemini-2.0-flash"},
     {"provider": "google", "model": "gemma-3-27b-it"}
 ]
 MAX_HISTORY = 30
 
 MODEL_RATING_TEXT = (
     "\n\n🏆 <b>Рейтинг интеллекта:</b>\n"
-    "🥇 <code>gemini-2.5-flash</code> — лучшие бенчмарки, Google Search\n"
-    "🥈 <code>llama-3.3-70b-versatile</code> — 70B параметров, сильные рассуждения\n"
-    "🥉 <code>llama-4-scout-17b</code> — быстрая MoE, но меньше параметров\n"
-    "4️⃣ <code>gemini-2.0-flash</code> — чуть слабее 2.5\n"
-    "5️⃣ <code>gemma-3-27b-it</code> — напочатку норм"
+    "🥇 <code>gemini-2.5-flash</code>, <code>llama-3.3-70b-versatile</code> — Лучшие бенчмарки, самые умные из представленных\n"
+    "🥈 <code>gemini-2.0-flash</code>, <code>llama-4-scout-17b</code>  — Хорошие рассуждения, чуть слабее 2.5 и 3.3\n"
+    "🥉 <code>gemma-3-27b-it</code> — Неплохая, забавная модель\n"
 )
-SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'МегаМоZг' вместе с двумя другими нейросетями: 
+SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
 - Рациональная, добрая, понимающая девушка 20-ти лет Llama (вы также откликаетесь на русское имя Лама).
 - Девочка-подросток, глупая и добрая, 16 лет Gemma, стажерка (вы также откликаетесь на русское имя Гемма).
@@ -129,10 +127,10 @@ def update_history(chat_id, role, text):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Режим МегаМоZг 🤪", callback_data="mode_worker")],
+        [InlineKeyboardButton(text="Шуточный режим (RolePlay)🤪", callback_data="mode_worker")],
         [InlineKeyboardButton(text="Серьезный режим 🧐", callback_data="mode_serious")]
     ])
-    await message.answer("Выберите режим работы бота:", reply_markup=keyboard)
+    await message.answer("Выберите режим работы бота: \n1. Шуточный режим. Нейросети думают, что они реальные люди и работают в телеграмм боте. \n2. Серьезный режим. Нейросети отвечают стандартно.", reply_markup=keyboard)
 
 @dp.callback_query(F.data.startswith("mode_"))
 async def handle_mode_selection(callback: CallbackQuery):
@@ -141,7 +139,7 @@ async def handle_mode_selection(callback: CallbackQuery):
     user_modes[chat_id] = mode
     
     if mode == "worker":
-        await callback.message.edit_text("✅ Выбран режим МегаМоZг!\nГлавная моя прелесть - никогда не знаешь, какая модель тебе ответит, умный Gemini, рациональная Llama или глупенькая Gemma. Помню 30 сообщений. Сброс: /clear")
+        await callback.message.edit_text("✅ Выбран режим RolePlay!\nГлавная моя прелесть - никогда не знаешь, какая модель тебе ответит, умный Gemini, рациональная Llama или глупенькая Gemma. Помню 30 сообщений. Сброс: /clear")
     else:
         user_models[chat_id] = "gemini-2.5-flash"
         
@@ -413,7 +411,7 @@ async def handle_message(message: types.Message):
         formatted_text = format_for_telegram(final_text)
 
         # Добавляем название модели в начало ответа
-        mode_indicator = "🧐 [Серьезный]" if mode == "serious" else "🤪 [МегаМоZг]"
+        mode_indicator = "🧐 [Стандартный]" if mode == "serious" else "🤪 [RolePlay]"
         formatted_text = f"🤖 <b>[{used_model}]</b> {mode_indicator}\n\n{formatted_text}"
 
         # Предупреждение, если ответила не та модель, которую звали
@@ -440,7 +438,7 @@ async def handle_message(message: types.Message):
 
 # --- ЗАПУСК ---
 async def main():
-    logger.info("📡 Запуск MegaMoZg в Telegram...")
+    logger.info("📡 Запуск бота в Telegram...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
