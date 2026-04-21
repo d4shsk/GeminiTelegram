@@ -470,7 +470,14 @@ async def handle_message(message: types.Message):
                 or_history = []
                 tz_moscow = pytz.timezone("Europe/Moscow")
                 current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
-                or_history.append({"role": "system", "content": f"Текущие дата и время (МСК): {current_datetime}"})
+                or_history.append({
+                    "role": "system",
+                    "content": (
+                        "Ты — умная языковая модель. Отвечай чётко, думай аналитически, "
+                        "объясняй своё рассуждение. "
+                        f"Текущие дата и время (МСК): {current_datetime}"
+                    )
+                })
                 for msg in sessions.get(chat_id, []):
                     role = "assistant" if msg["role"] == "model" else msg["role"]
                     or_history.append({"role": role, "content": msg["text"]})
@@ -481,6 +488,7 @@ async def handle_message(message: types.Message):
                         model=model_id,
                         messages=or_history,
                         max_tokens=1024,
+                        temperature=0.3,
                     ),
                     timeout=30.0
                 )
