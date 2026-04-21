@@ -1,5 +1,7 @@
 # Тестовые файлы с ключами
 test_groq.py
+test_zai.py
+test_gpt.py
 
 # Python
 __pycache__/

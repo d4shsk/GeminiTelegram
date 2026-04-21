@@ -11,6 +11,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from google import genai
 from groq import AsyncGroq
+import openai as openai_lib
 from aiogram.client.session.aiohttp import AiohttpSession
 from ddgs import DDGS
 
@@ -23,12 +24,13 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # --- КОНФИГУРАЦИЯ ---
 MODEL_PRIORITY = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-    {"provider": "google", "model": "gemini-flash-latest"},
-    {"provider": "google", "model": "gemini-2.5-flash"},
-    {"provider": "groq", "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
-    {"provider": "google", "model": "gemini-2.0-flash"},
-    {"provider": "google", "model": "gemma-3-27b-it"}
+    {"provider": "groq",        "model": "llama-3.3-70b-versatile"},
+    {"provider": "google",      "model": "gemini-flash-latest"},
+    {"provider": "google",      "model": "gemini-2.5-flash"},
+    {"provider": "groq",        "model": "meta-llama/llama-4-scout-17b-16e-instruct"},
+    {"provider": "google",      "model": "gemini-2.0-flash"},
+    {"provider": "google",      "model": "gemma-3-27b-it"},
+    {"provider": "openrouter",  "model": "z-ai/glm-4.5-air:free", "serious_only": True},
 ]
 MAX_HISTORY = 30
 
@@ -37,6 +39,7 @@ MODEL_RATING_TEXT = (
     "🥇 <code>gemini-2.5-flash</code>, <code>llama-3.3-70b-versatile</code> — Лучшие бенчмарки, самые умные из представленных\n"
     "🥈 <code>gemini-2.0-flash</code>, <code>llama-4-scout-17b</code>  — Хорошие рассуждения, чуть слабее 2.5 и 3.3\n"
     "🥉 <code>gemma-3-27b-it</code> — Неплохая, забавная модель\n"
+    "🔬 <code>z-ai/glm-4.5-air</code> — Экспериментально: данные об этой модели ещё собираются\n"
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -85,6 +88,7 @@ async def perform_web_search(query: str) -> str:
 tg_token = os.environ.get("TELEGRAM_TOKEN")
 gemini_key = os.environ.get("GEMINI_API_KEY")
 groq_key = os.environ.get("GROQ_API_KEY")
+openrouter_key = os.environ.get("OPENROUTER_API_KEY")
 
 bot = Bot(token=tg_token)
 dp = Dispatcher()
@@ -93,6 +97,14 @@ if groq_key:
     groq_client = AsyncGroq(api_key=groq_key)
 else:
     groq_client = None
+if openrouter_key:
+    openrouter_client = openai_lib.AsyncOpenAI(
+        api_key=openrouter_key,
+        base_url="https://openrouter.ai/api/v1",
+        default_headers={"HTTP-Referer": "https://localhost", "X-Title": "DummyLLM"},
+    )
+else:
+    openrouter_client = None
 
 sessions = {}
 active_models = {}
@@ -170,7 +182,10 @@ async def handle_mode_selection(callback: CallbackQuery):
 
         model_buttons = []
         for model_info in MODEL_PRIORITY:
-            model_buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
+            label = model_info["model"]
+            if model_info.get("serious_only"):
+                label = "🔬 " + label
+            model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
 
         inline_kb = InlineKeyboardMarkup(inline_keyboard=model_buttons)
         await callback.message.edit_text(
@@ -191,7 +206,11 @@ async def send_model_picker(target, chat_id: int):
     """Отправляет меню выбора модели. target — message или callback.message."""
     model_buttons = []
     for model_info in MODEL_PRIORITY:
-        model_buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
+        # serious_only-модели доступны только в этом меню (серьёзный режим)
+        label = model_info["model"]
+        if model_info.get("serious_only"):
+            label = "🔬 " + label
+        model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
     inline_kb = InlineKeyboardMarkup(inline_keyboard=model_buttons)
     await target.answer(show_model_picker_text(), reply_markup=inline_kb, parse_mode="HTML")
 
@@ -260,7 +279,8 @@ async def handle_message(message: types.Message):
     requested_name = None
     
     if mode == "worker":
-        current_priority = list(MODEL_PRIORITY)
+        # В шуточном режиме не используем serious_only модели
+        current_priority = [m for m in MODEL_PRIORITY if not m.get("serious_only")]
         # Запоминаем выбор пользователя, если он явно позвал модель
         if "гемм" in text_lower or "gemma" in text_lower:
             active_models[chat_id] = "gemma"
@@ -438,6 +458,36 @@ async def handle_message(message: types.Message):
                 if response_message and response_message.content:
                     final_text = response_message.content
                     response_text_to_save = final_text
+                    used_model = model_id
+                    break
+
+            elif provider == "openrouter":
+                if not openrouter_client:
+                    logger.warning("⚠️ Не задан OPENROUTER_API_KEY, пропускаем OpenRouter-модель")
+                    continue
+
+                # Собираем историю в формате OpenAI
+                or_history = []
+                tz_moscow = pytz.timezone("Europe/Moscow")
+                current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
+                or_history.append({"role": "system", "content": f"Текущие дата и время (МСК): {current_datetime}"})
+                for msg in sessions.get(chat_id, []):
+                    role = "assistant" if msg["role"] == "model" else msg["role"]
+                    or_history.append({"role": role, "content": msg["text"]})
+                or_history.append({"role": "user", "content": user_input})
+
+                or_response = await asyncio.wait_for(
+                    openrouter_client.chat.completions.create(
+                        model=model_id,
+                        messages=or_history,
+                        max_tokens=1024,
+                    ),
+                    timeout=30.0
+                )
+                or_text = (or_response.choices[0].message.content or "").strip()
+                if or_text:
+                    final_text = or_text
+                    response_text_to_save = or_text
                     used_model = model_id
                     break
                     
