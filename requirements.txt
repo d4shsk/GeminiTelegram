@@ -3,3 +3,4 @@ google-genai
 certifi
 aiohttp
 groq
+duckduckgo-search
