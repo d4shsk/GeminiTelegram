@@ -130,7 +130,13 @@ async def handle_mode_selection(callback: CallbackQuery):
         await callback.message.edit_text("✅ Выбран режим МегаМоZг!\nГлавная моя прелесть - никогда не знаешь, какая модель тебе ответит, умный Gemini, рациональная Llama или глупенькая Gemma. Помню 30 сообщений. Сброс: /clear")
     else:
         user_models[chat_id] = "gemini-2.5-flash"
-        await callback.message.edit_text("✅ Выбран Серьезный режим!\nСистемный промпт отключен. Вы можете выбрать модель с помощью команды /model. По умолчанию установлена gemini-2.5-flash. Помню 30 сообщений. Сброс: /clear")
+        
+        buttons = []
+        for model_info in MODEL_PRIORITY:
+            buttons.append([InlineKeyboardButton(text=model_info["model"], callback_data=f"setmodel_{model_info['model']}")])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.edit_text("✅ Выбран Серьезный режим!\nСистемный промпт отключен. Выберите предпочитаемую модель (при недоступности будет использована следующая по приоритету):", reply_markup=keyboard)
     await callback.answer()
 
 @dp.message(Command("model"))
@@ -201,12 +207,18 @@ async def handle_message(message: types.Message):
     else:
         # Серьезный режим
         selected_model_id = user_models.get(chat_id, "gemini-2.5-flash")
-        provider = "google"
+        
+        current_priority = []
+        # Сначала добавляем выбранную модель
         for m in MODEL_PRIORITY:
             if m["model"] == selected_model_id:
-                provider = m["provider"]
+                current_priority.append(m)
                 break
-        current_priority = [{"provider": provider, "model": selected_model_id}]
+        
+        # Затем добавляем остальные модели как запасные
+        for m in MODEL_PRIORITY:
+            if m["model"] != selected_model_id:
+                current_priority.append(m)
 
     for model_info in current_priority:
         provider = model_info["provider"]
@@ -296,7 +308,22 @@ async def handle_message(message: types.Message):
                 response_message = response.choices[0].message
                 
                 if response_message.tool_calls:
-                    groq_history.append(response_message)
+                    tool_calls_dicts = []
+                    for tc in response_message.tool_calls:
+                        tool_calls_dicts.append({
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        })
+                    
+                    groq_history.append({
+                        "role": "assistant",
+                        "content": response_message.content or "",
+                        "tool_calls": tool_calls_dicts
+                    })
                     
                     for tool_call in response_message.tool_calls:
                         if tool_call.function.name == "search_internet":
