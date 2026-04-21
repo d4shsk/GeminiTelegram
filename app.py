@@ -59,7 +59,7 @@ GROQ_TOOLS = [
 
 def sync_web_search(query: str) -> str:
     try:
-        results = DDGS().text(query, max_results=3)
+        results = DDGS().text(query, max_results=5)
         if not results:
             return "Ничего не найдено."
         return "\n".join([f"Название: {r.get('title', '')}\nОписание: {r.get('body', '')}\nСсылка: {r.get('href', '')}" for r in results])
