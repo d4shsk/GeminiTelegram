@@ -140,9 +140,41 @@ def format_for_telegram(text: str) -> str:
     text = re.sub(r'```(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
     text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
+    # Конвертируем одиночные звёздочки в курсив (но не в списках и не если это часть слова)
+    text = re.sub(r'(?<!\*)\*([^\*\n]+?)\*(?!\*)', r'<i>\1</i>', text)
     text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
     text = re.sub(r'(?m)^\s*\*\s', '• ', text)
     text = re.sub(r'(?m)^#+\s+(.*)', r'<b>\1</b>', text)
+    
+    # Конвертируем Markdown таблицы в текстовый формат (Telegram не поддерживает HTML таблицы)
+    # Ищем таблицы: строка с |, затем строка с |---|, затем остальные строки с |
+    table_pattern = r'\|[^\n]*\|\n\s*\|[\s\-|:]+\|\n((?:\|[^\n]*\|\n?)*)'
+    def convert_table(match):
+        table_text = match.group(0)
+        lines = table_text.strip().split('\n')
+        if len(lines) < 2:
+            return table_text
+        
+        # Парсим заголовок (первая строка)
+        header_cells = [cell.strip() for cell in lines[0].split('|') if cell.strip()]
+        
+        # Парсим тело таблицы (с третьей строки)
+        body_lines = []
+        for line in lines[2:]:
+            cells = [cell.strip() for cell in line.split('|') if cell.strip()]
+            if cells:
+                body_lines.append(cells)
+        
+        # Форматируем как текст
+        result = "<b>" + " | ".join(header_cells) + "</b>\n"
+        result += "─" * (sum(len(h) for h in header_cells) + len(header_cells) * 3) + "\n"
+        for row in body_lines:
+            result += " | ".join(row) + "\n"
+        
+        return result.strip()
+    
+    text = re.sub(table_pattern, convert_table, text, flags=re.DOTALL)
+    
     return text
 
 def update_history(chat_id, role, text):
