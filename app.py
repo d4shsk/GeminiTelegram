@@ -37,12 +37,12 @@ MAX_HISTORY = 30
 
 MODEL_RATING_TEXT = (
     "\n\n🏆 <b>Рейтинг моделей:</b>\n"
-    "1. <code>kimi-k2.6</code>\n"
+    "1. <code>kimi-k2.6</code> — Видит картинки\n"
     "2. <code>gemini-2.5-flash</code>\n"
     "3. <code>gpt-4o</code> — Видит картинки\n"
     "4. <code>llama-3.3-70b-versatile</code>\n"
     "5. <code>gemma-3-27b-it</code>\n"
-    "\n🎨 <code>/image &lt;запрос&gt;</code> — генерация картинок (FLUX)"
+    "\n🎨 <b>FLUX</b> — генерация картинок (выберите в меню)"
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -121,6 +121,8 @@ sessions = {}
 active_models = {}
 user_modes = {}
 user_models = {}
+# Словарь для отслеживания пользователей, ожидающих промт для FLUX
+awaiting_flux_prompt = {}
 
 
 def format_for_telegram(text: str) -> str:
@@ -179,6 +181,7 @@ async def handle_mode_selection(callback: CallbackQuery):
     # Очищаем историю при смене режима
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
+    awaiting_flux_prompt.pop(chat_id, None)
 
     if mode == "worker":
         await callback.message.edit_text(
@@ -191,13 +194,7 @@ async def handle_mode_selection(callback: CallbackQuery):
     else:
         user_models[chat_id] = "gemini-2.5-flash"
 
-        model_buttons = []
-        for model_info in MODEL_PRIORITY:
-            label = model_info["model"].replace(":free", "")
-            if model_info.get("serious_only"):
-                label = "🔬 " + label
-            model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
-
+        model_buttons = _build_model_buttons()
         inline_kb = InlineKeyboardMarkup(inline_keyboard=model_buttons)
         await callback.message.edit_text(
             "✅ Выбран Серьезный режим! История очищена.\n"
@@ -210,19 +207,24 @@ async def handle_mode_selection(callback: CallbackQuery):
         await callback.message.answer("Меню всегда под рукой 👇", reply_markup=get_main_menu())
     await callback.answer()
 
+def _build_model_buttons() -> list:
+    """Строит список кнопок для выбора модели, включая FLUX."""
+    model_buttons = []
+    for model_info in MODEL_PRIORITY:
+        label = model_info["model"].replace(":free", "")
+        if model_info.get("serious_only"):
+            label = "🔬 " + label
+        model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
+    # Добавляем кнопку FLUX
+    model_buttons.append([InlineKeyboardButton(text="🎨 FLUX (генерация картинок)", callback_data="setmodel_flux")])
+    return model_buttons
+
 def show_model_picker_text() -> str:
     return "Выберите модель:" + MODEL_RATING_TEXT
 
 async def send_model_picker(target, chat_id: int):
     """Отправляет меню выбора модели. target — message или callback.message."""
-    model_buttons = []
-    for model_info in MODEL_PRIORITY:
-        # serious_only-модели доступны только в этом меню (серьёзный режим)
-        label = model_info["model"].replace(":free", "")
-        if model_info.get("serious_only"):
-            label = "🔬 " + label
-        model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
-    inline_kb = InlineKeyboardMarkup(inline_keyboard=model_buttons)
+    inline_kb = InlineKeyboardMarkup(inline_keyboard=_build_model_buttons())
     await target.answer(show_model_picker_text(), reply_markup=inline_kb, parse_mode="HTML")
 
 @dp.message(Command("model"))
@@ -236,8 +238,20 @@ async def cmd_model(message: types.Message):
 @dp.callback_query(F.data.startswith("setmodel_"))
 async def handle_model_selection(callback: CallbackQuery):
     model_id = callback.data.split("_", 1)[1]
-    user_models[callback.message.chat.id] = model_id
-    await callback.message.edit_text(f"✅ Модель изменена на: {model_id}")
+    chat_id = callback.message.chat.id
+    user_models[chat_id] = model_id
+    awaiting_flux_prompt.pop(chat_id, None)
+
+    if model_id == "flux":
+        awaiting_flux_prompt[chat_id] = True
+        await callback.message.edit_text(
+            "🎨 <b>FLUX — генерация картинок</b>\n\n"
+            "Напишите промт для генерации изображения.\n"
+            "<i>Например: закат над горами в стиле аниме</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text(f"✅ Модель изменена на: {model_id}")
     await callback.answer()
 
 @dp.message(Command("clear"))
@@ -245,7 +259,192 @@ async def cmd_clear(message: types.Message):
     chat_id = message.chat.id
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
+    awaiting_flux_prompt.pop(chat_id, None)
     await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
+
+# --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (FLUX) ---
+
+async def generate_image_cf(prompt: str) -> bytes | None:
+    """Генерирует изображение через Cloudflare flux-1-schnell. Возвращает PNG байты."""
+    if not (cf_account_id and cf_api_token):
+        return None
+    url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    headers = {"Authorization": f"Bearer {cf_api_token}"}
+    payload = {"prompt": prompt}
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        resp = await http.post(url, headers=headers, json=payload)
+        if resp.status_code == 200:
+            ct = resp.headers.get("content-type", "")
+            if "image" in ct:
+                return resp.content
+            # Cloudflare может вернуть JSON с base64
+            try:
+                data = resp.json()
+                b64 = (data.get("result") or {}).get("image") or data.get("image")
+                if b64:
+                    return base64.b64decode(b64)
+            except Exception:
+                pass
+        logger.warning(f"⚠️ Flux ошибка {resp.status_code}: {resp.text[:200]}")
+        return None
+
+@dp.message(Command("image"))
+async def cmd_image(message: types.Message):
+    """Генерирует изображение по тексту через FLUX-1-schnell (Cloudflare)."""
+    prompt = message.text.partition(" ")[2].strip()
+    if not prompt:
+        await message.answer("✏️ Укажи запрос после команды, например:\n<code>/image закат над горами</code>", parse_mode="HTML")
+        return
+    if not (cf_account_id and cf_api_token):
+        await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, генерация недоступна.")
+        return
+    await bot.send_chat_action(message.chat.id, "upload_photo")
+    img_bytes = await generate_image_cf(prompt)
+    if img_bytes:
+        buf = io.BytesIO(img_bytes)
+        buf.name = "image.png"
+        await message.answer_photo(
+            types.BufferedInputFile(buf.getvalue(), filename="image.png"),
+            caption=f"🎨 <b>FLUX-1-schnell</b>\n<i>{prompt[:200]}</i>",
+            parse_mode="HTML"
+        )
+    else:
+        await message.answer("❌ Не удалось сгенерировать изображение. Попробуй позже.")
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    """Обработчик фото — видение через gpt-4o (GitHub Models) или kimi-k2.6 (Cloudflare)."""
+    chat_id = message.chat.id
+    mode = user_modes.get(chat_id, "worker")
+
+    if mode != "serious":
+        await message.answer("📷 Отправка картинок доступна только в Серьёзном режиме с моделью gpt-4o или kimi-k2.6.")
+        return
+
+    selected_model = user_models.get(chat_id, "")
+    vision_models = {"gpt-4o", "@cf/moonshotai/kimi-k2.6"}
+
+    if selected_model not in vision_models:
+        await message.answer(
+            "📷 Отправка картинок работает только с моделями <code>gpt-4o</code> или <code>🔬 @cf/moonshotai/kimi-k2.6</code>.\n"
+            "Смените модель через 🤖 Сменить модель.",
+            parse_mode="HTML"
+        )
+        return
+
+    await bot.send_chat_action(chat_id, "typing")
+
+    # Скачиваем крупнейшее фото (file_id последнее = максимальное разрешение)
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buf = io.BytesIO()
+    await bot.download_file(file.file_path, destination=buf)
+    image_b64 = base64.b64encode(buf.getvalue()).decode()
+
+    caption = message.caption or "Что на этом изображении? Опиши подробно."
+    tz_moscow = pytz.timezone("Europe/Moscow")
+    current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
+
+    if selected_model == "gpt-4o":
+        if not github_ai_client:
+            await message.answer("⚠️ Не задан GITHUB_TOKEN, зрение недоступно.")
+            return
+        try:
+            gh_response = await asyncio.wait_for(
+                github_ai_client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Отвечай на русском языке. Описывай изображение подробно и чётко. "
+                                f"Текущие дата и время (МСК): {current_datetime}"
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": caption},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_b64}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=1024,
+                    temperature=0.3,
+                ),
+                timeout=45.0
+            )
+            answer = (gh_response.choices[0].message.content or "").strip()
+            if answer:
+                formatted = format_for_telegram(answer)
+                formatted = f"🤖 <b>[gpt-4o]</b> 📷 [Vision]\n\n{formatted}"
+                try:
+                    await message.answer(formatted, parse_mode="HTML")
+                except Exception:
+                    await message.answer(answer)
+            else:
+                await message.answer("🤔 Модель не смогла дать ответ на это изображение.")
+        except asyncio.TimeoutError:
+            await message.answer("⏱ Обработка изображения заняла слишком много времени. Попробуй ещё раз.")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка Vision gpt-4o: {str(e)[:100]}")
+            await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
+
+    elif selected_model == "@cf/moonshotai/kimi-k2.6":
+        if not cf_client:
+            await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, зрение недоступно.")
+            return
+        try:
+            kimi_response = await asyncio.wait_for(
+                cf_client.chat.completions.create(
+                    model="@cf/moonshotai/kimi-k2.6",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Отвечай на русском языке. Описывай изображение подробно и чётко. "
+                                f"Текущие дата и время (МСК): {current_datetime}"
+                            )
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": caption},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_b64}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=1024,
+                ),
+                timeout=45.0
+            )
+            answer = (kimi_response.choices[0].message.content or "").strip()
+            if answer:
+                formatted = format_for_telegram(answer)
+                formatted = f"🤖 <b>[kimi-k2.6]</b> 📷 [Vision]\n\n{formatted}"
+                try:
+                    await message.answer(formatted, parse_mode="HTML")
+                except Exception:
+                    await message.answer(answer)
+            else:
+                await message.answer("🤔 Модель не смогла дать ответ на это изображение.")
+        except asyncio.TimeoutError:
+            await message.answer("⏱ Обработка изображения заняла слишком много времени. Попробуй ещё раз.")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка Vision kimi-k2.6: {str(e)[:100]}")
+            await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -277,9 +476,30 @@ async def handle_message(message: types.Message):
     if user_input == "🧹 Очистить историю":
         sessions.pop(chat_id, None)
         active_models.pop(chat_id, None)
+        awaiting_flux_prompt.pop(chat_id, None)
         await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
         return
-    
+
+    # --- Обработка режима ожидания промта для FLUX ---
+    if awaiting_flux_prompt.get(chat_id):
+        awaiting_flux_prompt.pop(chat_id, None)
+        if not (cf_account_id and cf_api_token):
+            await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, генерация недоступна.")
+            return
+        await bot.send_chat_action(chat_id, "upload_photo")
+        img_bytes = await generate_image_cf(user_input)
+        if img_bytes:
+            buf = io.BytesIO(img_bytes)
+            buf.name = "image.png"
+            await message.answer_photo(
+                types.BufferedInputFile(buf.getvalue(), filename="image.png"),
+                caption=f"🎨 <b>FLUX-1-schnell</b>\n<i>{user_input[:200]}</i>",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Не удалось сгенерировать изображение. Попробуй позже.")
+        return
+
     await bot.send_chat_action(chat_id, "typing")
 
     final_text = None
@@ -315,18 +535,45 @@ async def handle_message(message: types.Message):
     else:
         # Серьезный режим
         selected_model_id = user_models.get(chat_id, "gemini-2.5-flash")
-        
+
+        # Если выбран FLUX — предложить написать промт
+        if selected_model_id == "flux":
+            awaiting_flux_prompt[chat_id] = True
+            await message.answer(
+                "🎨 <b>FLUX — генерация картинок</b>\n\nНапишите промт для генерации изображения.",
+                parse_mode="HTML"
+            )
+            return
+
         current_priority = []
         # Сначала добавляем выбранную модель
         for m in MODEL_PRIORITY:
             if m["model"] == selected_model_id:
                 current_priority.append(m)
                 break
-        
-        # Затем добавляем остальные модели как запасные
+
+        # Затем добавляем запасные модели: сначала gpt-4o, потом остальные (llama последней)
+        # Порядок запасных: gpt-4o → gemini-2.5-flash → gemma → kimi → llama
+        fallback_order = [
+            "gpt-4o",
+            "gemini-2.5-flash",
+            "@cf/moonshotai/kimi-k2.6",
+            "gemma-3-27b-it",
+            "llama-3.3-70b-versatile",
+        ]
+        added = {selected_model_id}
+        for fallback_id in fallback_order:
+            if fallback_id not in added:
+                for m in MODEL_PRIORITY:
+                    if m["model"] == fallback_id:
+                        current_priority.append(m)
+                        added.add(fallback_id)
+                        break
+        # Добавляем всё, что не попало (на случай новых моделей)
         for m in MODEL_PRIORITY:
-            if m["model"] != selected_model_id:
+            if m["model"] not in added:
                 current_priority.append(m)
+                added.add(m["model"])
 
     for model_info in current_priority:
         provider = model_info["provider"]
@@ -672,135 +919,6 @@ async def handle_message(message: types.Message):
                 await message.answer(final_text)
     else:
         await message.answer("🤯 Перегрузка всех систем. Попробуй позже.")
-
-
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    """Обработчик фото — видение через gpt-4o (GitHub Models)."""
-    chat_id = message.chat.id
-    mode = user_modes.get(chat_id, "worker")
-
-    if mode != "serious":
-        await message.answer("📷 Отправка картинок доступна только в Серьёзном режиме с выбранной моделью gpt-4o.")
-        return
-
-    selected_model = user_models.get(chat_id, "")
-    if selected_model != "gpt-4o":
-        await message.answer("📷 Отправка картинок работает только с моделью <code>gpt-4o</code>. Смените модель через 🤖 Сменить модель.", parse_mode="HTML")
-        return
-
-    if not github_ai_client:
-        await message.answer("⚠️ Не задан GITHUB_TOKEN, зрение недоступно.")
-        return
-
-    await bot.send_chat_action(chat_id, "typing")
-
-    # Скачиваем крупнейшее фото (file_id последнее = максимальное разрешение)
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    buf = io.BytesIO()
-    await bot.download_file(file.file_path, destination=buf)
-    image_b64 = base64.b64encode(buf.getvalue()).decode()
-
-    caption = message.caption or "Что на этом изображении? Опиши подробно."
-
-    try:
-        tz_moscow = pytz.timezone("Europe/Moscow")
-        current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
-        gh_response = await asyncio.wait_for(
-            github_ai_client.chat.completions.create(
-                model="gpt-4o",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Отвечай на русском языке. Описывай изображение подробно и чётко. "
-                            f"Текущие дата и время (МСК): {current_datetime}"
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": caption},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_b64}",
-                                    "detail": "high"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=1024,
-                temperature=0.3,
-            ),
-            timeout=45.0
-        )
-        answer = (gh_response.choices[0].message.content or "").strip()
-        if answer:
-            formatted = format_for_telegram(answer)
-            formatted = f"🤖 <b>[gpt-4o]</b> 📂 [Vision]\n\n{formatted}"
-            try:
-                await message.answer(formatted, parse_mode="HTML")
-            except Exception:
-                await message.answer(answer)
-        else:
-            await message.answer("🤔 Модель не смогла дать ответ на это изображение.")
-    except asyncio.TimeoutError:
-        await message.answer("⏱ Обработка изображения заняла слишком много времени. Попробуй ещё раз.")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка Vision gpt-4o: {str(e)[:100]}")
-        await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
-
-# --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (FLUX) ---
-
-async def generate_image_cf(prompt: str) -> bytes | None:
-    """Генерирует изображение через Cloudflare flux-1-schnell. Возвращает PNG байты."""
-    if not (cf_account_id and cf_api_token):
-        return None
-    url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/ai/run/@cf/black-forest-labs/flux-1-schnell"
-    headers = {"Authorization": f"Bearer {cf_api_token}"}
-    payload = {"prompt": prompt}
-    async with httpx.AsyncClient(timeout=60.0) as http:
-        resp = await http.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            ct = resp.headers.get("content-type", "")
-            if "image" in ct:
-                return resp.content
-            # Cloudflare может вернуть JSON с base64
-            try:
-                data = resp.json()
-                b64 = (data.get("result") or {}).get("image") or data.get("image")
-                if b64:
-                    return base64.b64decode(b64)
-            except Exception:
-                pass
-        logger.warning(f"⚠️ Flux ошибка {resp.status_code}: {resp.text[:200]}")
-        return None
-
-@dp.message(Command("image"))
-async def cmd_image(message: types.Message):
-    """Генерирует изображение по тексту через FLUX-1-schnell (Cloudflare)."""
-    prompt = message.text.partition(" ")[2].strip()
-    if not prompt:
-        await message.answer("✏️ Укажи запрос после команды, например:\n<code>/image закат над горами</code>", parse_mode="HTML")
-        return
-    if not (cf_account_id and cf_api_token):
-        await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, генерация недоступна.")
-        return
-    await bot.send_chat_action(message.chat.id, "upload_photo")
-    img_bytes = await generate_image_cf(prompt)
-    if img_bytes:
-        buf = io.BytesIO(img_bytes)
-        buf.name = "image.png"
-        await message.answer_photo(
-            types.BufferedInputFile(buf.getvalue(), filename="image.png"),
-            caption=f"🎨 <b>FLUX-1-schnell</b>\n<i>{prompt[:200]}</i>",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer("❌ Не удалось сгенерировать изображение. Попробуй позже.")
 
 # --- ЗАПУСК ---
 async def main():
