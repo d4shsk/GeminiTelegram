@@ -731,86 +731,79 @@ async def handle_message(message: types.Message):
                     cf_history.append({"role": role, "content": msg["text"]})
                 cf_history.append({"role": "user", "content": user_input})
 
-                cf_response = await asyncio.wait_for(
-                    cf_client.chat.completions.create(
-                        model=model_id,
-                        messages=cf_history,
-                        tools=SEARCH_TOOLS,
-                        tool_choice="auto",
-                        max_tokens=2048,
-                    ),
-                    timeout=30.0
-                )
+                cf_text = ""
+                
+                # Даем модели максимум 3 попытки на поиск, чтобы не уйти в бесконечный цикл
+                for _ in range(3):
+                    cf_response = await asyncio.wait_for(
+                        cf_client.chat.completions.create(
+                            model=model_id,
+                            messages=cf_history,
+                            tools=SEARCH_TOOLS, # ВАЖНО: передаем инструменты каждый раз!
+                            tool_choice="auto",
+                            max_tokens=2048,
+                        ),
+                        timeout=30.0
+                    )
 
-                cf_message = cf_response.choices[0].message
+                    cf_message = cf_response.choices[0].message
+                    cf_text = (cf_message.content or "").strip()
 
-                if cf_message.tool_calls:
-                    tool_calls_dicts = []
-                    for tc in cf_message.tool_calls:
-                        tool_calls_dicts.append({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                        })
-                    cf_history.append({
-                        "role": "assistant",
-                        "content": cf_message.content,
-                        "tool_calls": tool_calls_dicts
-                    })
-                    for tool_call in cf_message.tool_calls:
-                        if tool_call.function.name == "search_internet":
-                            args = json.loads(tool_call.function.arguments)
-                            search_query = args.get("query", "")
-                            logger.info(f"Kimi tool call: search_internet for '{search_query}'")
-                            search_result = await perform_web_search(search_query)
-                            cf_history.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "name": tool_call.function.name,
-                                "content": search_result
+                    # 1. Проверяем стандартные tool_calls (как в первый раз)
+                    if cf_message.tool_calls:
+                        tool_calls_dicts = []
+                        for tc in cf_message.tool_calls:
+                            tool_calls_dicts.append({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
                             })
-                    cf_response2 = await asyncio.wait_for(
-                        cf_client.chat.completions.create(
-                            model=model_id,
-                            messages=cf_history,
-                            max_tokens=2048,
-                        ),
-                        timeout=30.0
-                    )
-                    cf_message = cf_response2.choices[0].message
+                        cf_history.append({
+                            "role": "assistant",
+                            "content": cf_message.content,
+                            "tool_calls": tool_calls_dicts
+                        })
+                        
+                        for tool_call in cf_message.tool_calls:
+                            if tool_call.function.name == "search_internet":
+                                try:
+                                    args = json.loads(tool_call.function.arguments)
+                                    search_query = args.get("query", "")
+                                    logger.info(f"Kimi tool call: search_internet for '{search_query}'")
+                                    search_result = await perform_web_search(search_query)
+                                    cf_history.append({
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "name": tool_call.function.name,
+                                        "content": search_result
+                                    })
+                                except Exception as e:
+                                    logger.error(f"Ошибка парсинга аргументов Kimi: {e}")
+                        
+                        # Переходим на следующий круг цикла, отправляя результаты поиска
+                        continue 
 
-            cf_text = (cf_message.content or "").strip()
+                    # 2. Резервный парсинг сырых токенов (страховка от багов Cloudflare)
+                    elif "<|toolcallbegin|>" in cf_text and "searchinternet" in cf_text.lower():
+                        match = re.search(r'\{"query":\s*"(.*?)"\}', cf_text)
+                        if match:
+                            search_query = match.group(1)
+                            logger.info(f"Kimi (raw token) tool call: search_internet for '{search_query}'")
+                            search_result = await perform_web_search(search_query)
+                            cf_history.append({"role": "assistant", "content": cf_text})
+                            cf_history.append({"role": "user", "content": f"Результаты поиска:\n{search_result}"})
+                            continue
 
-            # Резервный парсинг сырых токенов Kimi
-            if "<|toolcallbegin|>" in cf_text and "searchinternet" in cf_text.lower():
-                import re
-                # Ищем JSON внутри тегов
-                match = re.search(r'\{"query":\s*"(.*?)"\}', cf_text)
-                if match:
-                    search_query = match.group(1)
-                    logger.info(f"Kimi (raw token) tool call: search_internet for '{search_query}'")
-                    search_result = await perform_web_search(search_query)
-                    
-                    # Добавляем сырой ответ и результат поиска в историю
-                    cf_history.append({"role": "assistant", "content": cf_text})
-                    cf_history.append({"role": "user", "content": f"Результаты поиска:\n{search_result}"})
-                    
-                    # Делаем повторный запрос к модели
-                    cf_response2 = await asyncio.wait_for(
-                        cf_client.chat.completions.create(
-                            model=model_id,
-                            messages=cf_history,
-                            max_tokens=2048,
-                        ),
-                        timeout=30.0
-                    )
-                    cf_text = (cf_response2.choices[0].message.content or "").strip()
+                    # 3. Если тулзов нет, значит модель выдала финальный текстовый ответ
+                    else:
+                        break
 
-            if cf_text:
-                final_text = cf_text
-                response_text_to_save = cf_text
-                used_model = "kimi-k2.6"
-                break
+                # Финальная проверка перед сохранением
+                if cf_text and "<|toolcallssectionbegin|>" not in cf_text:
+                    final_text = cf_text
+                    response_text_to_save = cf_text
+                    used_model = "kimi-k2.6"
+                    break
             
             elif provider == "github":
                 if not github_ai_client:
