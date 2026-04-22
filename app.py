@@ -19,11 +19,6 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from ddgs import DDGS
 
 import telegramify_markdown
-from telegramify_markdown import customize
-
-# Опционально: можно отключить конвертацию __текст__ в подчеркивание,
-# чтобы это работало как классический жирный текст/курсив, если нужно.
-customize.strict_markdown = True
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
