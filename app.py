@@ -735,6 +735,8 @@ async def handle_message(message: types.Message):
                 
                 # Даем модели максимум 3 попытки на поиск, чтобы не уйти в бесконечный цикл
                 for _ in range(3):
+                    await bot.send_chat_action(chat_id, "typing")
+                    
                     cf_response = await asyncio.wait_for(
                         cf_client.chat.completions.create(
                             model=model_id,
@@ -743,7 +745,7 @@ async def handle_message(message: types.Message):
                             tool_choice="auto",
                             max_tokens=2048,
                         ),
-                        timeout=30.0
+                        timeout=60.0
                     )
 
                     cf_message = cf_response.choices[0].message
