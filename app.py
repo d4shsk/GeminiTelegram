@@ -40,7 +40,7 @@ MAX_HISTORY = 30
 MODEL_RATING_TEXT = (
     "\n\n🏆 <b>Рейтинг моделей:</b>\n"
     "1. <code>kimi-k2.6</code> — Видит картинки\n"
-    "2. <code>gemini-2.5-flash</code>\n"
+    "2. <code>gemini-2.5-flash</code> — Видит картинки\n"
     "3. <code>gpt-4o</code> — Видит картинки\n"
     "4. <code>llama-3.3-70b-versatile</code>\n"
     "5. <code>gemma-3-27b-it</code>\n"
@@ -264,20 +264,20 @@ async def cmd_clear(message: types.Message):
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    """Обработчик фото — видение через gpt-4o (GitHub Models) или kimi-k2.6 (Cloudflare)."""
+    """Обработчик фото — видение через Gemini, gpt-4o (GitHub Models) или kimi-k2.6 (Cloudflare)."""
     chat_id = message.chat.id
     mode = user_modes.get(chat_id, "worker")
 
     if mode != "serious":
-        await message.answer("📷 Отправка картинок доступна только в Серьёзном режиме с моделью gpt-4o или kimi-k2.6.")
+        await message.answer("📷 Отправка картинок доступна только в Серьёзном режиме с моделью gemini-2.5-flash, gpt-4o или kimi-k2.6.")
         return
 
     selected_model = user_models.get(chat_id, "")
-    vision_models = {"gpt-4o", "@cf/moonshotai/kimi-k2.6"}
+    vision_models = {"gemini-2.5-flash", "gpt-4o", "@cf/moonshotai/kimi-k2.6"}
 
     if selected_model not in vision_models:
         await message.answer(
-            "📷 Отправка картинок работает только с моделями <code>gpt-4o</code> или <code>🔬 @cf/moonshotai/kimi-k2.6</code>.\n"
+            "📷 Отправка картинок работает только с моделями <code>gemini-2.5-flash</code>, <code>gpt-4o</code> или <code>🔬 @cf/moonshotai/kimi-k2.6</code>.\n"
             "Смените модель через 🤖 Сменить модель.",
             parse_mode="HTML"
         )
@@ -296,7 +296,66 @@ async def handle_photo(message: types.Message):
     tz_moscow = pytz.timezone("Europe/Moscow")
     current_datetime = datetime.now(tz_moscow).strftime("%d %B %Y, %H:%M МСК")
 
-    if selected_model == "gpt-4o":
+    if selected_model == "gemini-2.5-flash":
+        if not gemini_key:
+            await message.answer("⚠️ Не задан GEMINI_API_KEY, зрение недоступно.")
+            return
+        try:
+            config = genai.types.GenerateContentConfig(
+                system_instruction=(
+                    "Отвечай на русском языке. Описывай изображение подробно и чётко. "
+                    f"Текущие дата и время (МСК): {current_datetime}"
+                ),
+                temperature=0.3,
+            )
+
+            try:
+                image_part = genai.types.Part.from_bytes(
+                    data=buf.getvalue(),
+                    mime_type="image/jpeg"
+                )
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[caption, image_part],
+                        config=config
+                    ),
+                    timeout=45.0
+                )
+            except Exception:
+                # Fallback для версий SDK, где удобнее передавать inline_data.
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=[{
+                            "role": "user",
+                            "parts": [
+                                {"text": caption},
+                                {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}
+                            ]
+                        }],
+                        config=config
+                    ),
+                    timeout=45.0
+                )
+
+            answer = (response.text or "").strip()
+            if answer:
+                raw_text = f"🤖 **[gemini-2.5-flash]** 📷 [Vision]\n\n{answer}"
+                formatted = format_for_telegram(raw_text)
+                try:
+                    await message.answer(formatted, parse_mode="MarkdownV2")
+                except Exception:
+                    await message.answer(answer)
+            else:
+                await message.answer("🤔 Модель не смогла дать ответ на это изображение.")
+        except asyncio.TimeoutError:
+            await message.answer("⏱ Обработка изображения заняла слишком много времени. Попробуй ещё раз.")
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка Vision Gemini: {str(e)[:100]}")
+            await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
+
+    elif selected_model == "gpt-4o":
         if not github_ai_client:
             await message.answer("⚠️ Не задан GITHUB_TOKEN, зрение недоступно.")
             return
