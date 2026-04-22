@@ -733,26 +733,41 @@ async def handle_message(message: types.Message):
 
                 cf_text = ""
                 
-                # Даем модели максимум 3 попытки на поиск, чтобы не уйти в бесконечный цикл
-                for _ in range(3):
+                
+                # Делаем максимум 7 обращений к API (6 попыток поиска + 1 принудительный ответ)
+                for attempt in range(7):
+                    # Отправляем статус "печатает", чтобы юзер понимал, что процесс идет
                     await bot.send_chat_action(chat_id, "typing")
                     
-                    cf_response = await asyncio.wait_for(
-                        cf_client.chat.completions.create(
-                            model=model_id,
-                            messages=cf_history,
-                            tools=SEARCH_TOOLS, # ВАЖНО: передаем инструменты каждый раз!
-                            tool_choice="auto",
-                            max_tokens=2048,
-                        ),
-                        timeout=60.0
-                    )
+                    if attempt < 6:
+                        # Первые 6 попыток: разрешаем модели использовать поиск
+                        cf_response = await asyncio.wait_for(
+                            cf_client.chat.completions.create(
+                                model=model_id,
+                                messages=cf_history,
+                                tools=SEARCH_TOOLS, 
+                                tool_choice="auto",
+                                max_tokens=2048,
+                            ),
+                            timeout=60.0
+                        )
+                    else:
+                        # 7-я попытка (финальная): отключаем tools! 
+                        # Теперь модель ОБЯЗАНА выдать текстовый ответ на основе того, что нашла за 6 раз.
+                        cf_response = await asyncio.wait_for(
+                            cf_client.chat.completions.create(
+                                model=model_id,
+                                messages=cf_history,
+                                max_tokens=2048,
+                            ),
+                            timeout=60.0
+                        )
 
                     cf_message = cf_response.choices[0].message
                     cf_text = (cf_message.content or "").strip()
 
-                    # 1. Проверяем стандартные tool_calls (как в первый раз)
-                    if cf_message.tool_calls:
+                    # 1. Проверяем стандартные tool_calls
+                    if getattr(cf_message, "tool_calls", None):
                         tool_calls_dicts = []
                         for tc in cf_message.tool_calls:
                             tool_calls_dicts.append({
@@ -781,11 +796,9 @@ async def handle_message(message: types.Message):
                                     })
                                 except Exception as e:
                                     logger.error(f"Ошибка парсинга аргументов Kimi: {e}")
-                        
-                        # Переходим на следующий круг цикла, отправляя результаты поиска
                         continue 
 
-                    # 2. Резервный парсинг сырых токенов (страховка от багов Cloudflare)
+                    # 2. Резервный парсинг сырых токенов
                     elif "<|toolcallbegin|>" in cf_text and "searchinternet" in cf_text.lower():
                         match = re.search(r'\{"query":\s*"(.*?)"\}', cf_text)
                         if match:
@@ -796,16 +809,17 @@ async def handle_message(message: types.Message):
                             cf_history.append({"role": "user", "content": f"Результаты поиска:\n{search_result}"})
                             continue
 
-                    # 3. Если тулзов нет, значит модель выдала финальный текстовый ответ
+                    # 3. Текстовый ответ без попыток поиска! Выходим из цикла.
                     else:
                         break
-
-                # Финальная проверка перед сохранением
+                    
+                # Финальная проверка перед сохранением ответа
                 if cf_text and "<|toolcallssectionbegin|>" not in cf_text:
                     final_text = cf_text
                     response_text_to_save = cf_text
-                    used_model = "kimi-k2.6"
+                    used_model = model_id
                     break
+            
             
             elif provider == "github":
                 if not github_ai_client:
