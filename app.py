@@ -42,7 +42,7 @@ MODEL_RATING_TEXT = (
     "3. <code>gpt-4o</code> — Видит картинки\n"
     "4. <code>llama-3.3-70b-versatile</code>\n"
     "5. <code>gemma-3-27b-it</code>\n"
-    "\n🎨 <b>FLUX</b> — генерация картинок (выберите в меню)"
+    "\n🎨 <b>Imagen 4</b> — генерация картинок (выберите в меню)"
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -93,7 +93,23 @@ gemini_key = os.environ.get("GEMINI_API_KEY")
 groq_key = os.environ.get("GROQ_API_KEY")
 github_token = os.environ.get("GITHUB_TOKEN")
 cf_account_id = os.environ.get("CF_ACCOUNT_ID")
-cf_api_token = os.environ.get("CF_API_TOKEN")
+# Получаем аккаунты и токены (через запятую)
+cf_account_ids_str = os.environ.get("CF_ACCOUNT_IDS", os.environ.get("CF_ACCOUNT_ID", ""))
+cf_api_tokens_str = os.environ.get("CF_API_TOKENS", os.environ.get("CF_API_TOKEN", ""))
+
+CF_ACCOUNTS = [a.strip() for a in cf_account_ids_str.split(",") if a.strip()]
+CF_TOKENS = [t.strip() for t in cf_api_tokens_str.split(",") if t.strip()]
+
+# Умная логика: если аккаунт один, а токенов несколько (например, воркеры на одном аккаунте), 
+# размножаем этот аккаунт на все токены.
+if len(CF_ACCOUNTS) == 1 and len(CF_TOKENS) > 1:
+    CF_ACCOUNTS = CF_ACCOUNTS * len(CF_TOKENS)
+
+if len(CF_ACCOUNTS) != len(CF_TOKENS):
+    logger.warning("⚠️ ВНИМАНИЕ: Количество CF_ACCOUNTS не совпадает с CF_TOKENS!")
+
+# Единый индекс для связки "Аккаунт + Токен"
+current_cf_idx = 0
 
 bot = Bot(token=tg_token)
 dp = Dispatcher()
@@ -109,20 +125,13 @@ if github_token:
     )
 else:
     github_ai_client = None
-if cf_account_id and cf_api_token:
-    cf_client = openai_lib.AsyncOpenAI(
-        api_key=cf_api_token,
-        base_url=f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/ai/v1",
-    )
-else:
-    cf_client = None
 
 sessions = {}
 active_models = {}
 user_modes = {}
 user_models = {}
-# Словарь для отслеживания пользователей, ожидающих промт для FLUX
-awaiting_flux_prompt = {}
+# Словарь для отслеживания пользователей, ожидающих промт для Imagen
+awaiting_imagen_prompt = {}
 
 
 def format_for_telegram(text: str) -> str:
@@ -181,7 +190,7 @@ async def handle_mode_selection(callback: CallbackQuery):
     # Очищаем историю при смене режима
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
-    awaiting_flux_prompt.pop(chat_id, None)
+    awaiting_imagen_prompt.pop(chat_id, None)
 
     if mode == "worker":
         await callback.message.edit_text(
@@ -208,15 +217,15 @@ async def handle_mode_selection(callback: CallbackQuery):
     await callback.answer()
 
 def _build_model_buttons() -> list:
-    """Строит список кнопок для выбора модели, включая FLUX."""
+    """Строит список кнопок для выбора модели, включая Imagen."""
     model_buttons = []
     for model_info in MODEL_PRIORITY:
         label = model_info["model"].replace(":free", "")
         if model_info.get("serious_only"):
             label = "🔬 " + label
         model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
-    # Добавляем кнопку FLUX
-    model_buttons.append([InlineKeyboardButton(text="🎨 FLUX (генерация картинок)", callback_data="setmodel_flux")])
+    # Добавляем кнопку Imagen
+    model_buttons.append([InlineKeyboardButton(text="🎨 Imagen 4 (генерация картинок)", callback_data="setmodel_imagen")])
     return model_buttons
 
 def show_model_picker_text() -> str:
@@ -240,13 +249,13 @@ async def handle_model_selection(callback: CallbackQuery):
     model_id = callback.data.split("_", 1)[1]
     chat_id = callback.message.chat.id
     user_models[chat_id] = model_id
-    awaiting_flux_prompt.pop(chat_id, None)
+    awaiting_imagen_prompt.pop(chat_id, None)
 
-    if model_id == "flux":
-        awaiting_flux_prompt[chat_id] = True
+    if model_id == "imagen":
+        awaiting_imagen_prompt[chat_id] = True
         await callback.message.edit_text(
-            "🎨 <b>FLUX — генерация картинок</b>\n\n"
-            "Напишите промт для генерации изображения.\n"
+            "🎨 <b>Imagen 4 — генерация картинок</b>\n\n"
+            "Напишите промт для генерации изображения (рекомендуется на английском языке).\n"
             "<i>Например: закат над горами в стиле аниме</i>",
             parse_mode="HTML"
         )
@@ -259,53 +268,56 @@ async def cmd_clear(message: types.Message):
     chat_id = message.chat.id
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
-    awaiting_flux_prompt.pop(chat_id, None)
+    awaiting_imagen_prompt.pop(chat_id, None)
     await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
 
-# --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (FLUX) ---
+# --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (IMAGEN 4) ---
 
-async def generate_image_cf(prompt: str) -> bytes | None:
-    """Генерирует изображение через Cloudflare flux-1-schnell. Возвращает PNG байты."""
-    if not (cf_account_id and cf_api_token):
+async def generate_image_google(prompt: str) -> bytes | None:
+    """Генерирует изображение через Google Imagen 4. Возвращает байты."""
+    if not gemini_key:
         return None
-    url = f"https://api.cloudflare.com/client/v4/accounts/{cf_account_id}/ai/run/@cf/black-forest-labs/flux-1-schnell"
-    headers = {"Authorization": f"Bearer {cf_api_token}"}
-    payload = {"prompt": prompt}
-    async with httpx.AsyncClient(timeout=60.0) as http:
-        resp = await http.post(url, headers=headers, json=payload)
-        if resp.status_code == 200:
-            ct = resp.headers.get("content-type", "")
-            if "image" in ct:
-                return resp.content
-            # Cloudflare может вернуть JSON с base64
-            try:
-                data = resp.json()
-                b64 = (data.get("result") or {}).get("image") or data.get("image")
-                if b64:
-                    return base64.b64decode(b64)
-            except Exception:
-                pass
-        logger.warning(f"⚠️ Flux ошибка {resp.status_code}: {resp.text[:200]}")
+    try:
+        # Используем асинхронный клиент Google
+        result = await client.aio.models.generate_images(
+            model='models/imagen-4.0-generate-001',
+            prompt=prompt,
+            config=dict(
+                number_of_images=1,
+                output_mime_type="image/jpeg",
+                aspect_ratio="1:1" # Можно изменить на "16:9" или "9:16"
+            )
+        )
+        for generated_image in result.generated_images:
+            return generated_image.image.image_bytes
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка Imagen 3: {e}")
         return None
 
 @dp.message(Command("image"))
 async def cmd_image(message: types.Message):
-    """Генерирует изображение по тексту через FLUX-1-schnell (Cloudflare)."""
+    """Генерирует изображение по тексту через Imagen 4."""
     prompt = message.text.partition(" ")[2].strip()
     if not prompt:
         await message.answer("✏️ Укажи запрос после команды, например:\n<code>/image закат над горами</code>", parse_mode="HTML")
         return
-    if not (cf_account_id and cf_api_token):
-        await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, генерация недоступна.")
+    
+    # ИСПРАВЛЕНО: проверяем ключ от Google, а не от Cloudflare
+    if not gemini_key:
+        await message.answer("⚠️ Не задан GEMINI_API_KEY, генерация недоступна.")
         return
+        
     await bot.send_chat_action(message.chat.id, "upload_photo")
-    img_bytes = await generate_image_cf(prompt)
+    
+    # ИСПРАВЛЕНО: вызываем правильную функцию
+    img_bytes = await generate_image_google(prompt)
+    
     if img_bytes:
         buf = io.BytesIO(img_bytes)
-        buf.name = "image.png"
+        buf.name = "image.jpeg" # ИСПРАВЛЕНО: Imagen отдает jpeg
         await message.answer_photo(
-            types.BufferedInputFile(buf.getvalue(), filename="image.png"),
-            caption=f"🎨 <b>FLUX-1-schnell</b>\n<i>{prompt[:200]}</i>",
+            types.BufferedInputFile(buf.getvalue(), filename="image.jpeg"),
+            caption=f"🎨 <b>Imagen 4</b>\n<i>{prompt[:200]}</i>",
             parse_mode="HTML"
         )
     else:
@@ -397,12 +409,21 @@ async def handle_photo(message: types.Message):
             await message.answer(f"❌ Ошибка при анализе изображения: {str(e)[:80]}")
 
     elif selected_model == "@cf/moonshotai/kimi-k2.6":
-        if not cf_client:
+        if not cf_account_id or not CF_TOKENS:
             await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, зрение недоступно.")
             return
         try:
+            global current_cf_idx
+            current_token = CF_TOKENS[current_cf_idx]
+            current_account = CF_ACCOUNTS[current_cf_idx]
+            
+            temp_cf_client = openai_lib.AsyncOpenAI(
+                api_key=current_token,
+                base_url=f"https://api.cloudflare.com/client/v4/accounts/{current_account}/ai/v1",
+            )
+            
             kimi_response = await asyncio.wait_for(
-                cf_client.chat.completions.create(
+                temp_cf_client.chat.completions.create(
                     model="@cf/moonshotai/kimi-k2.6",
                     messages=[
                         {
@@ -476,24 +497,28 @@ async def handle_message(message: types.Message):
     if user_input == "🧹 Очистить историю":
         sessions.pop(chat_id, None)
         active_models.pop(chat_id, None)
-        awaiting_flux_prompt.pop(chat_id, None)
+        awaiting_imagen_prompt.pop(chat_id, None)
         await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
         return
 
-    # --- Обработка режима ожидания промта для FLUX ---
-    if awaiting_flux_prompt.get(chat_id):
-        awaiting_flux_prompt.pop(chat_id, None)
-        if not (cf_account_id and cf_api_token):
-            await message.answer("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, генерация недоступна.")
+    # --- Обработка режима ожидания промта для Imagen ---
+    if awaiting_imagen_prompt.get(chat_id):
+        awaiting_imagen_prompt.pop(chat_id, None)
+        
+        # ИСПРАВЛЕНО: проверка ключа Google
+        if not gemini_key:
+            await message.answer("⚠️ Не задан GEMINI_API_KEY, генерация недоступна.")
             return
+            
         await bot.send_chat_action(chat_id, "upload_photo")
-        img_bytes = await generate_image_cf(user_input)
+        img_bytes = await generate_image_google(user_input)
+        
         if img_bytes:
             buf = io.BytesIO(img_bytes)
-            buf.name = "image.png"
+            buf.name = "image.jpeg"
             await message.answer_photo(
-                types.BufferedInputFile(buf.getvalue(), filename="image.png"),
-                caption=f"🎨 <b>FLUX-1-schnell</b>\n<i>{user_input[:200]}</i>",
+                types.BufferedInputFile(buf.getvalue(), filename="image.jpeg"),
+                caption=f"🎨 <b>Imagen 4</b>\n<i>{user_input[:200]}</i>", # ИСПРАВЛЕНО: обновил цифру на 4
                 parse_mode="HTML"
             )
         else:
@@ -536,11 +561,11 @@ async def handle_message(message: types.Message):
         # Серьезный режим
         selected_model_id = user_models.get(chat_id, "gemini-2.5-flash")
 
-        # Если выбран FLUX — предложить написать промт
-        if selected_model_id == "flux":
-            awaiting_flux_prompt[chat_id] = True
+        # Если выбран Imagen — предложить написать промт
+        if selected_model_id == "imagen":
+            awaiting_imagen_prompt[chat_id] = True
             await message.answer(
-                "🎨 <b>FLUX — генерация картинок</b>\n\nНапишите промт для генерации изображения.",
+                "🎨 <b>Imagen 3 — генерация картинок</b>\n\nНапишите промт для генерации изображения.",
                 parse_mode="HTML"
             )
             return
@@ -719,8 +744,8 @@ async def handle_message(message: types.Message):
                     break
 
             elif provider == "cloudflare":
-                if not cf_client:
-                    logger.warning("⚠️ Не заданы CF_ACCOUNT_ID / CF_API_TOKEN, пропускаем Kimi")
+                if not CF_ACCOUNTS or not CF_TOKENS:
+                    await message.answer("⚠️ Не заданы ключи Cloudflare, зрение недоступно.")
                     continue
 
                 tz_moscow = pytz.timezone("Europe/Moscow")
@@ -732,94 +757,47 @@ async def handle_message(message: types.Message):
                 cf_history.append({"role": "user", "content": user_input})
 
                 cf_text = ""
-                
-                
-                # Делаем максимум 7 обращений к API (6 попыток поиска + 1 принудительный ответ)
-                for attempt in range(7):
-                    # Отправляем статус "печатает", чтобы юзер понимал, что процесс идет
-                    await bot.send_chat_action(chat_id, "typing")
+                attempts = 0
+                global current_cf_idx
+
+                # Цикл перебора связок ключей
+                while attempts < len(CF_TOKENS):
+                    current_token = CF_TOKENS[current_cf_idx]
+                    current_account = CF_ACCOUNTS[current_cf_idx]
                     
-                    if attempt < 6:
-                        # Первые 6 попыток: разрешаем модели использовать поиск
+                    # Создаем клиента с нужным токеном И нужным аккаунтом
+                    temp_cf_client = openai_lib.AsyncOpenAI(
+                        api_key=current_token,
+                        base_url=f"https://api.cloudflare.com/client/v4/accounts/{current_account}/ai/v1",
+                    )
+                    
+                    try:
                         cf_response = await asyncio.wait_for(
-                            cf_client.chat.completions.create(
-                                model=model_id,
-                                messages=cf_history,
-                                tools=SEARCH_TOOLS, 
-                                tool_choice="auto",
-                                max_tokens=2048,
-                            ),
-                            timeout=60.0
-                        )
-                    else:
-                        # 7-я попытка (финальная): отключаем tools! 
-                        # Теперь модель ОБЯЗАНА выдать текстовый ответ на основе того, что нашла за 6 раз.
-                        cf_response = await asyncio.wait_for(
-                            cf_client.chat.completions.create(
+                            temp_cf_client.chat.completions.create(
                                 model=model_id,
                                 messages=cf_history,
                                 max_tokens=2048,
                             ),
                             timeout=60.0
                         )
-
-                    cf_message = cf_response.choices[0].message
-                    cf_text = (cf_message.content or "").strip()
-
-                    # 1. Проверяем стандартные tool_calls
-                    if getattr(cf_message, "tool_calls", None):
-                        tool_calls_dicts = []
-                        for tc in cf_message.tool_calls:
-                            tool_calls_dicts.append({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {"name": tc.function.name, "arguments": tc.function.arguments}
-                            })
-                        cf_history.append({
-                            "role": "assistant",
-                            "content": cf_message.content,
-                            "tool_calls": tool_calls_dicts
-                        })
+                        cf_text = (cf_response.choices[0].message.content or "").strip()
+                        break  # Успех — выходим
                         
-                        for tool_call in cf_message.tool_calls:
-                            if tool_call.function.name == "search_internet":
-                                try:
-                                    args = json.loads(tool_call.function.arguments)
-                                    search_query = args.get("query", "")
-                                    logger.info(f"Kimi tool call: search_internet for '{search_query}'")
-                                    search_result = await perform_web_search(search_query)
-                                    cf_history.append({
-                                        "role": "tool",
-                                        "tool_call_id": tool_call.id,
-                                        "name": tool_call.function.name,
-                                        "content": search_result
-                                    })
-                                except Exception as e:
-                                    logger.error(f"Ошибка парсинга аргументов Kimi: {e}")
-                        continue 
+                    except Exception as e:
+                        error_msg = str(e).lower()
+                        if "429" in error_msg or "limit" in error_msg or "quota" in error_msg:
+                            logger.warning(f"⚠️ Лимиты Cloudflare (индекс {current_cf_idx}). Переключаем аккаунт и токен...")
+                            # Сдвигаем индекс на следующую пару
+                            current_cf_idx = (current_cf_idx + 1) % len(CF_TOKENS)
+                            attempts += 1
+                        else:
+                            raise e
 
-                    # 2. Резервный парсинг сырых токенов
-                    elif "<|toolcallbegin|>" in cf_text and "searchinternet" in cf_text.lower():
-                        match = re.search(r'\{"query":\s*"(.*?)"\}', cf_text)
-                        if match:
-                            search_query = match.group(1)
-                            logger.info(f"Kimi (raw token) tool call: search_internet for '{search_query}'")
-                            search_result = await perform_web_search(search_query)
-                            cf_history.append({"role": "assistant", "content": cf_text})
-                            cf_history.append({"role": "user", "content": f"Результаты поиска:\n{search_result}"})
-                            continue
-
-                    # 3. Текстовый ответ без попыток поиска! Выходим из цикла.
-                    else:
-                        break
-                    
-                # Финальная проверка перед сохранением ответа
-                if cf_text and "<|toolcallssectionbegin|>" not in cf_text:
+                if cf_text:
                     final_text = cf_text
                     response_text_to_save = cf_text
                     used_model = model_id
                     break
-            
             
             elif provider == "github":
                 if not github_ai_client:
