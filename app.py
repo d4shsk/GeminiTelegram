@@ -418,7 +418,7 @@ async def handle_photo(message: types.Message):
 async def handle_message(message: types.Message):
     chat_id = message.chat.id
     user_input = message.text
-    mode = user_modes.get(chat_id, "worker")
+    mode = user_modes.get(chat_id, "serious")
 
     # --- Обработка кнопок постоянного меню ---
     if user_input == "🔄 Сменить режим":
@@ -482,7 +482,7 @@ async def handle_message(message: types.Message):
             current_priority.sort(key=lambda x: "gemini" not in x["model"].lower())
     else:
         # Серьезный режим
-        selected_model_id = user_models.get(chat_id, "gemini-2.5-flash")
+        selected_model_id = user_models.get(chat_id, "gpt-4o")
 
         current_priority = []
         # Сначала добавляем выбранную модель
