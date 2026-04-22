@@ -743,14 +743,8 @@ async def handle_message(message: types.Message):
                 )
 
                 cf_message = cf_response.choices[0].message
-                cf_text = cf_message.content or ""
-
-                # Проверяем, вернула ли модель tool call в виде текста (специфично для kimi-k2.6 на Cloudflare)
-                tool_call_marker = "<|toolcallssectionbegin|>"
-                has_raw_tool_call = tool_call_marker in cf_text
 
                 if cf_message.tool_calls:
-                    # Стандартная обработка через объект tool_calls
                     tool_calls_dicts = []
                     for tc in cf_message.tool_calls:
                         tool_calls_dicts.append({
@@ -784,48 +778,40 @@ async def handle_message(message: types.Message):
                         timeout=30.0
                     )
                     cf_message = cf_response2.choices[0].message
-                    cf_text = cf_message.content or ""
 
-                elif has_raw_tool_call:
-                    # Обработка сырого tool call в тексте (kimi-k2.6 специфика)
-                    logger.info(f"Kimi вернула raw tool call в тексте: {cf_text[:200]}")
-                    # Извлекаем JSON из формата <|toolcallbegin|>functions.searchinternet:1<|toolcallargumentbegin|>{"query": "..."}<|toolcallend|>
-                    import re
-                    pattern = r'<\|toolcallargumentbegin\|>(\{.*?\})<\|toolcallend\|>'
-                    match = re.search(pattern, cf_text, re.DOTALL)
-                    if match:
-                        try:
-                            args = json.loads(match.group(1))
-                            search_query = args.get("query", "")
-                            logger.info(f"Kimi raw tool call parsed: search_internet for '{search_query}'")
-                            search_result = await perform_web_search(search_query)
-                            # Добавляем результаты поиска в историю и запрашиваем финальный ответ
-                            cf_history.append({"role": "assistant", "content": cf_text})
-                            cf_history.append({
-                                "role": "system",
-                                "content": f"Результаты поиска по запросу '{search_query}':\n{search_result}\n\nИспользуя эти данные, ответь на исходный запрос пользователя."
-                            })
-                            cf_response2 = await asyncio.wait_for(
-                                cf_client.chat.completions.create(
-                                    model=model_id,
-                                    messages=cf_history,
-                                    max_tokens=2048,
-                                ),
-                                timeout=30.0
-                            )
-                            cf_message = cf_response2.choices[0].message
-                            cf_text = cf_message.content or ""
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Не удалось распарсить JSON из raw tool call: {e}")
-                    else:
-                        logger.warning("Не удалось извлечь JSON из raw tool call kimi-k2.6")
+            cf_text = (cf_message.content or "").strip()
 
-                if cf_text:
-                    final_text = cf_text
-                    response_text_to_save = cf_text
-                    used_model = "kimi-k2.6"
-                    break
+            # Резервный парсинг сырых токенов Kimi
+            if "<|toolcallbegin|>" in cf_text and "searchinternet" in cf_text.lower():
+                import re
+                # Ищем JSON внутри тегов
+                match = re.search(r'\{"query":\s*"(.*?)"\}', cf_text)
+                if match:
+                    search_query = match.group(1)
+                    logger.info(f"Kimi (raw token) tool call: search_internet for '{search_query}'")
+                    search_result = await perform_web_search(search_query)
+                    
+                    # Добавляем сырой ответ и результат поиска в историю
+                    cf_history.append({"role": "assistant", "content": cf_text})
+                    cf_history.append({"role": "user", "content": f"Результаты поиска:\n{search_result}"})
+                    
+                    # Делаем повторный запрос к модели
+                    cf_response2 = await asyncio.wait_for(
+                        cf_client.chat.completions.create(
+                            model=model_id,
+                            messages=cf_history,
+                            max_tokens=2048,
+                        ),
+                        timeout=30.0
+                    )
+                    cf_text = (cf_response2.choices[0].message.content or "").strip()
 
+            if cf_text:
+                final_text = cf_text
+                response_text_to_save = cf_text
+                used_model = "kimi-k2.6"
+                break
+            
             elif provider == "github":
                 if not github_ai_client:
                     logger.warning("⚠️ Не задан GITHUB_TOKEN, пропускаем GitHub Models")
