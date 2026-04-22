@@ -42,7 +42,6 @@ MODEL_RATING_TEXT = (
     "3. <code>gpt-4o</code> — Видит картинки\n"
     "4. <code>llama-3.3-70b-versatile</code>\n"
     "5. <code>gemma-3-27b-it</code>\n"
-    "\n🎨 <b>Imagen 4</b> — генерация картинок (выберите в меню)"
 )
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте 'DummyLLM' (Дамми ЛЛМ) вместе с двумя другими нейросетями: 
 - Взрослый, умный и опытный мужчина Gemini (вы также откликаетесь на русское имя Гемини).
@@ -130,8 +129,6 @@ sessions = {}
 active_models = {}
 user_modes = {}
 user_models = {}
-# Словарь для отслеживания пользователей, ожидающих промт для Imagen
-awaiting_imagen_prompt = {}
 
 
 def format_for_telegram(text: str) -> str:
@@ -190,7 +187,6 @@ async def handle_mode_selection(callback: CallbackQuery):
     # Очищаем историю при смене режима
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
-    awaiting_imagen_prompt.pop(chat_id, None)
 
     if mode == "worker":
         await callback.message.edit_text(
@@ -217,15 +213,13 @@ async def handle_mode_selection(callback: CallbackQuery):
     await callback.answer()
 
 def _build_model_buttons() -> list:
-    """Строит список кнопок для выбора модели, включая Imagen."""
+    """Строит список кнопок для выбора модели."""
     model_buttons = []
     for model_info in MODEL_PRIORITY:
         label = model_info["model"].replace(":free", "")
         if model_info.get("serious_only"):
             label = "🔬 " + label
         model_buttons.append([InlineKeyboardButton(text=label, callback_data=f"setmodel_{model_info['model']}")])
-    # Добавляем кнопку Imagen
-    model_buttons.append([InlineKeyboardButton(text="🎨 Imagen 4 (генерация картинок)", callback_data="setmodel_imagen")])
     return model_buttons
 
 def show_model_picker_text() -> str:
@@ -249,18 +243,8 @@ async def handle_model_selection(callback: CallbackQuery):
     model_id = callback.data.split("_", 1)[1]
     chat_id = callback.message.chat.id
     user_models[chat_id] = model_id
-    awaiting_imagen_prompt.pop(chat_id, None)
 
-    if model_id == "imagen":
-        awaiting_imagen_prompt[chat_id] = True
-        await callback.message.edit_text(
-            "🎨 <b>Imagen 4 — генерация картинок</b>\n\n"
-            "Напишите промт для генерации изображения (рекомендуется на английском языке).\n"
-            "<i>Например: закат над горами в стиле аниме</i>",
-            parse_mode="HTML"
-        )
-    else:
-        await callback.message.edit_text(f"✅ Модель изменена на: {model_id}")
+    await callback.message.edit_text(f"✅ Модель изменена на: {model_id}")
     await callback.answer()
 
 @dp.message(Command("clear"))
@@ -268,60 +252,8 @@ async def cmd_clear(message: types.Message):
     chat_id = message.chat.id
     sessions.pop(chat_id, None)
     active_models.pop(chat_id, None)
-    awaiting_imagen_prompt.pop(chat_id, None)
     await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
 
-# --- ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (IMAGEN 4) ---
-
-async def generate_image_google(prompt: str) -> bytes | None:
-    """Генерирует изображение через Google Imagen 4. Возвращает байты."""
-    if not gemini_key:
-        return None
-    try:
-        # Используем асинхронный клиент Google
-        result = await client.aio.models.generate_images(
-            model='models/imagen-4.0-generate-001',
-            prompt=prompt,
-            config=dict(
-                number_of_images=1,
-                output_mime_type="image/jpeg",
-                aspect_ratio="1:1" # Можно изменить на "16:9" или "9:16"
-            )
-        )
-        for generated_image in result.generated_images:
-            return generated_image.image.image_bytes
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка Imagen 3: {e}")
-        return None
-
-@dp.message(Command("image"))
-async def cmd_image(message: types.Message):
-    """Генерирует изображение по тексту через Imagen 4."""
-    prompt = message.text.partition(" ")[2].strip()
-    if not prompt:
-        await message.answer("✏️ Укажи запрос после команды, например:\n<code>/image закат над горами</code>", parse_mode="HTML")
-        return
-    
-    # ИСПРАВЛЕНО: проверяем ключ от Google, а не от Cloudflare
-    if not gemini_key:
-        await message.answer("⚠️ Не задан GEMINI_API_KEY, генерация недоступна.")
-        return
-        
-    await bot.send_chat_action(message.chat.id, "upload_photo")
-    
-    # ИСПРАВЛЕНО: вызываем правильную функцию
-    img_bytes = await generate_image_google(prompt)
-    
-    if img_bytes:
-        buf = io.BytesIO(img_bytes)
-        buf.name = "image.jpeg" # ИСПРАВЛЕНО: Imagen отдает jpeg
-        await message.answer_photo(
-            types.BufferedInputFile(buf.getvalue(), filename="image.jpeg"),
-            caption=f"🎨 <b>Imagen 4</b>\n<i>{prompt[:200]}</i>",
-            parse_mode="HTML"
-        )
-    else:
-        await message.answer("❌ Не удалось сгенерировать изображение. Попробуй позже.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
@@ -497,33 +429,9 @@ async def handle_message(message: types.Message):
     if user_input == "🧹 Очистить историю":
         sessions.pop(chat_id, None)
         active_models.pop(chat_id, None)
-        awaiting_imagen_prompt.pop(chat_id, None)
         await message.answer("🧹 История очищена.", reply_markup=get_main_menu())
         return
 
-    # --- Обработка режима ожидания промта для Imagen ---
-    if awaiting_imagen_prompt.get(chat_id):
-        awaiting_imagen_prompt.pop(chat_id, None)
-        
-        # ИСПРАВЛЕНО: проверка ключа Google
-        if not gemini_key:
-            await message.answer("⚠️ Не задан GEMINI_API_KEY, генерация недоступна.")
-            return
-            
-        await bot.send_chat_action(chat_id, "upload_photo")
-        img_bytes = await generate_image_google(user_input)
-        
-        if img_bytes:
-            buf = io.BytesIO(img_bytes)
-            buf.name = "image.jpeg"
-            await message.answer_photo(
-                types.BufferedInputFile(buf.getvalue(), filename="image.jpeg"),
-                caption=f"🎨 <b>Imagen 4</b>\n<i>{user_input[:200]}</i>", # ИСПРАВЛЕНО: обновил цифру на 4
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Не удалось сгенерировать изображение. Попробуй позже.")
-        return
 
     await bot.send_chat_action(chat_id, "typing")
 
@@ -560,15 +468,6 @@ async def handle_message(message: types.Message):
     else:
         # Серьезный режим
         selected_model_id = user_models.get(chat_id, "gemini-2.5-flash")
-
-        # Если выбран Imagen — предложить написать промт
-        if selected_model_id == "imagen":
-            awaiting_imagen_prompt[chat_id] = True
-            await message.answer(
-                "🎨 <b>Imagen 3 — генерация картинок</b>\n\nНапишите промт для генерации изображения.",
-                parse_mode="HTML"
-            )
-            return
 
         current_priority = []
         # Сначала добавляем выбранную модель
