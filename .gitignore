@@ -1,4 +1,16 @@
-```
+# Тестовые файлы с ключами
+test_groq.py
+test_github.py
+test_gpt.py
+
+# Python
 __pycache__/
-*.pyc
-```
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Переменные окружения
+.env
+*.env
