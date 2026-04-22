@@ -7,3 +7,4 @@ ddgs
 pytz
 openai
 httpx
+telegramify-markdown

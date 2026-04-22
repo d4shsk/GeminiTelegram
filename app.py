@@ -18,6 +18,13 @@ import openai as openai_lib
 from aiogram.client.session.aiohttp import AiohttpSession
 from ddgs import DDGS
 
+import telegramify_markdown
+from telegramify_markdown import customize
+
+# Опционально: можно отключить конвертацию __текст__ в подчеркивание,
+# чтобы это работало как классический жирный текст/курсив, если нужно.
+customize.strict_markdown = True
+
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -134,48 +141,8 @@ user_models = {}
 def format_for_telegram(text: str) -> str:
     if not text:
         return ""
-    # Конвертируем Markdown от Gemini в поддерживаемый Telegram HTML
-    text = text.replace("<", "&lt;").replace(">", "&gt;")
-    text = re.sub(r'```(?:.*?)\n(.*?)\n?```', r'<pre>\1</pre>', text, flags=re.DOTALL)
-    text = re.sub(r'```(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
-    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text, flags=re.DOTALL)
-    # Конвертируем одиночные звёздочки в курсив (но не в списках и не если это часть слова)
-    text = re.sub(r'(?<!\*)\*([^\*\n]+?)\*(?!\*)', r'<i>\1</i>', text)
-    text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
-    text = re.sub(r'(?m)^\s*\*\s', '• ', text)
-    text = re.sub(r'(?m)^#+\s+(.*)', r'<b>\1</b>', text)
-    
-    # Конвертируем Markdown таблицы в текстовый формат (Telegram не поддерживает HTML таблицы)
-    # Ищем таблицы: строка с |, затем строка с |---|, затем остальные строки с |
-    table_pattern = r'\|[^\n]*\|\n\s*\|[\s\-|:]+\|\n((?:\|[^\n]*\|\n?)*)'
-    def convert_table(match):
-        table_text = match.group(0)
-        lines = table_text.strip().split('\n')
-        if len(lines) < 2:
-            return table_text
-        
-        # Парсим заголовок (первая строка)
-        header_cells = [cell.strip() for cell in lines[0].split('|') if cell.strip()]
-        
-        # Парсим тело таблицы (с третьей строки)
-        body_lines = []
-        for line in lines[2:]:
-            cells = [cell.strip() for cell in line.split('|') if cell.strip()]
-            if cells:
-                body_lines.append(cells)
-        
-        # Форматируем как текст
-        result = "<b>" + " | ".join(header_cells) + "</b>\n"
-        result += "─" * (sum(len(h) for h in header_cells) + len(header_cells) * 3) + "\n"
-        for row in body_lines:
-            result += " | ".join(row) + "\n"
-        
-        return result.strip()
-    
-    text = re.sub(table_pattern, convert_table, text, flags=re.DOTALL)
-    
-    return text
+    # Библиотека переводит стандартный Markdown в Telegram MarkdownV2
+    return telegramify_markdown.markdownify(text)
 
 def update_history(chat_id, role, text):
     if chat_id not in sessions:
@@ -358,10 +325,10 @@ async def handle_photo(message: types.Message):
             )
             answer = (gh_response.choices[0].message.content or "").strip()
             if answer:
-                formatted = format_for_telegram(answer)
-                formatted = f"🤖 <b>[gpt-4o]</b> 📷 [Vision]\n\n{formatted}"
+                raw_text = f"🤖 **[gpt-4o]** 📷 [Vision]\n\n{answer}"
+                formatted = format_for_telegram(raw_text)
                 try:
-                    await message.answer(formatted, parse_mode="HTML")
+                    await message.answer(formatted, parse_mode="MarkdownV2")
                 except Exception:
                     await message.answer(answer)
             else:
@@ -417,10 +384,10 @@ async def handle_photo(message: types.Message):
             )
             answer = (kimi_response.choices[0].message.content or "").strip()
             if answer:
-                formatted = format_for_telegram(answer)
-                formatted = f"🤖 <b>[kimi-k2.6]</b> 📷 [Vision]\n\n{formatted}"
+                raw_text = f"🤖 **[kimi-k2.6]** 📷 [Vision]\n\n{answer}"
+                formatted = format_for_telegram(raw_text)
                 try:
-                    await message.answer(formatted, parse_mode="HTML")
+                    await message.answer(formatted, parse_mode="MarkdownV2")
                 except Exception:
                     await message.answer(answer)
             else:
@@ -834,30 +801,28 @@ async def handle_message(message: types.Message):
             else:
                 logger.warning(f"⚠️ Ошибка на {model_id} ({provider}): {str(e)[:50]}")
                 continue
-
     if final_text:
-        formatted_text = format_for_telegram(final_text)
-
-        # Добавляем название модели в начало ответа
+        # 1. Собираем весь текст в ОБЫЧНОМ Markdown
         mode_indicator = "🧐 [Стандартный]" if mode == "serious" else "🤪 [RolePlay]"
-        formatted_text = f"🤖 <b>[{used_model}]</b> {mode_indicator}\n\n{formatted_text}"
+        raw_full_text = f"🤖 **[{used_model}]** {mode_indicator}\n\n{final_text}"
 
-        # Предупреждение, если ответила не та модель, которую звали
         if requested_name and requested_name.lower() not in used_model.lower():
-            formatted_text += f"\n\n<i>(P.S. Вы звали {requested_name}, но она сейчас недоступна из-за ошибки API, поэтому ответила {used_model.split('-')[0].capitalize()})</i>"
+            raw_full_text += f"\n\n*(P.S. Вы звали {requested_name}, но она сейчас недоступна из-за ошибки API, поэтому ответила {used_model.split('-')[0].capitalize()})*"
 
+        # 2. Прогоняем ВЕСЬ собранный текст через библиотеку
+        formatted_text = format_for_telegram(raw_full_text)
         update_history(chat_id, "user", user_input)
         update_history(chat_id, "model", response_text_to_save)
 
         if len(formatted_text) > 4000:
             for i in range(0, len(formatted_text), 4000):
                 try:
-                    await message.answer(formatted_text[i:i+4000], parse_mode="HTML")
+                    await message.answer(formatted_text[i:i+4000], parse_mode="MarkdownV2")
                 except Exception:
                     await message.answer(final_text[i:i+4000])
         else:
             try:
-                await message.answer(formatted_text, parse_mode="HTML")
+                await message.answer(formatted_text, parse_mode="MarkdownV2")
             except Exception:
                 # Если HTML кривой, отправляем чистый текст
                 await message.answer(final_text)
