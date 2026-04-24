@@ -21,7 +21,7 @@ async def handle_photo(message: types.Message) -> None:
         await message.answer("📷 Отправка картинок доступна только в серьезном режиме.")
         return
 
-    selected_model = state.user_models.get(chat_id, "")
+    selected_model = state.user_models.get(chat_id, "gemini-2.5-flash")
     if selected_model not in VISION_MODELS:
         await message.answer(
             "📷 Анализ изображения доступен только с моделями "

@@ -1,12 +1,16 @@
 MODEL_PRIORITY = [
-    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
-    {"provider": "google", "model": "gemini-2.5-flash"},
-    {"provider": "google", "model": "gemma-3-27b-it"},
-    {"provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.6", "serious_only": True},
     {"provider": "github", "model": "gpt-4o", "serious_only": True},
+    {"provider": "google", "model": "gemini-2.5-flash-lite"},
+    {"provider": "google", "model": "gemini-2.5-flash"},
+    {"provider": "groq", "model": "llama-3.3-70b-versatile"},
+    {"provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.6", "serious_only": True},
+    {"provider": "google", "model": "gemma-3-27b-it"},
 ]
 
 MAX_HISTORY = 30
+HISTORY_KEEP_MESSAGES = 8
+HISTORY_TOKEN_BUDGET = 3600
+SUMMARY_CHAR_BUDGET = 1200
 
 MODE_WORKER = "worker"
 MODE_SERIOUS = "serious"
@@ -18,20 +22,22 @@ MENU_CLEAR_HISTORY = "🧹 Очистить историю"
 VISION_MODELS = {"gemini-2.5-flash", "gpt-4o", "@cf/moonshotai/kimi-k2.6"}
 
 SERIOUS_FALLBACK_ORDER = [
+    "gemini-2.5-flash-lite",
     "gpt-4o",
     "gemini-2.5-flash",
+    "llama-3.3-70b-versatile",
     "@cf/moonshotai/kimi-k2.6",
     "gemma-3-27b-it",
-    "llama-3.3-70b-versatile",
 ]
 
 MODEL_RATING_TEXT = (
     "\n\n🏆 <b>Рейтинг моделей:</b>\n"
-    "1. <code>kimi-k2.6</code> — Видит картинки\n"
-    "2. <code>gemini-2.5-flash</code> — Видит картинки\n"
-    "3. <code>gpt-4o</code> — Видит картинки\n"
+    "1. <code>gemini-2.5-flash-lite</code> — ответ по умолчанию\n"
+    "2. <code>gpt-4o</code> — авто-подъем для сложных запросов\n"
+    "3. <code>gemini-2.5-flash</code> — запасной Google fallback\n"
     "4. <code>llama-3.3-70b-versatile</code>\n"
-    "5. <code>gemma-3-27b-it</code>\n"
+    "5. <code>kimi-k2.6</code> — резервный multimodal fallback\n"
+    "6. <code>gemma-3-27b-it</code> — крайний резерв\n"
 )
 
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте DummyLLM вместе с другими моделями.

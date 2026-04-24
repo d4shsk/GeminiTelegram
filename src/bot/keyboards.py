@@ -34,7 +34,9 @@ def build_mode_picker() -> InlineKeyboardMarkup:
 
 
 def build_model_buttons() -> list[list[InlineKeyboardButton]]:
-    buttons: list[list[InlineKeyboardButton]] = []
+    buttons: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="AUTO", callback_data="setmodel_auto")]
+    ]
     for model_info in MODEL_PRIORITY:
         label = model_info["model"].replace(":free", "")
         if model_info.get("serious_only"):
@@ -48,4 +50,4 @@ def build_model_picker() -> InlineKeyboardMarkup:
 
 
 def model_picker_text() -> str:
-    return "Выберите модель:" + MODEL_RATING_TEXT
+    return "Выберите модель:\n<code>AUTO</code> — бот сам выбирает между flash-lite и gpt-4o.\n" + MODEL_RATING_TEXT

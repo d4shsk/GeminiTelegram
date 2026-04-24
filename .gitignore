@@ -7,6 +7,8 @@ test_gpt.py
 __pycache__/
 *.py[cod]
 *.pyo
+*.sqlite3
+data/
 .venv/
 venv/
 env/

@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 
 from aiogram import Bot
 from google import genai
@@ -45,6 +46,8 @@ class AppRuntime:
             logger.warning("Количество CF_ACCOUNT_IDS не совпадает с CF_API_TOKENS.")
 
         self.current_cf_idx = 0
+        self.provider_failures: dict[str, int] = {}
+        self.provider_cooldowns: dict[str, float] = {}
 
     def get_current_cf_credentials(self) -> tuple[str | None, str | None]:
         if not self.cf_accounts or not self.cf_tokens:
@@ -58,6 +61,36 @@ class AppRuntime:
     def rotate_cf_credentials(self) -> None:
         if self.cf_tokens:
             self.current_cf_idx = (self.current_cf_idx + 1) % len(self.cf_tokens)
+
+    def is_provider_available(self, provider: str) -> bool:
+        cooldown_until = self.provider_cooldowns.get(provider, 0.0)
+        if cooldown_until <= time.monotonic():
+            self.provider_cooldowns.pop(provider, None)
+            return True
+        return False
+
+    def provider_cooldown_remaining(self, provider: str) -> float:
+        cooldown_until = self.provider_cooldowns.get(provider, 0.0)
+        return max(0.0, cooldown_until - time.monotonic())
+
+    def mark_provider_success(self, provider: str) -> None:
+        self.provider_failures.pop(provider, None)
+        self.provider_cooldowns.pop(provider, None)
+
+    def mark_provider_failure(self, provider: str, *, rate_limited: bool = False) -> float:
+        failures = self.provider_failures.get(provider, 0) + 1
+        self.provider_failures[provider] = failures
+
+        cooldown_seconds = 0.0
+        if rate_limited:
+            cooldown_seconds = 600.0
+        elif failures >= 3:
+            cooldown_seconds = min(120.0 * (failures - 2), 900.0)
+
+        if cooldown_seconds:
+            self.provider_cooldowns[provider] = time.monotonic() + cooldown_seconds
+
+        return cooldown_seconds
 
 
 runtime = AppRuntime()

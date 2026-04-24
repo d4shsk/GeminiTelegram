@@ -37,7 +37,7 @@ async def handle_mode_selection(callback: CallbackQuery) -> None:
         )
         await callback.message.answer("Меню всегда под рукой 👇", reply_markup=build_main_menu())
     else:
-        state.user_models[chat_id] = "gemini-2.5-flash"
+        state.user_models.pop(chat_id, None)
         await callback.message.edit_text(
             "✅ Выбран серьезный режим. История очищена.\n"
             "Выберите предпочитаемую модель (если недоступна, будет fallback):"

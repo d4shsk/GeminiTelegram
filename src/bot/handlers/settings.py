@@ -25,8 +25,15 @@ async def handle_model_selection(callback: CallbackQuery) -> None:
         return
 
     model_id = callback.data.split("_", 1)[1]
-    state.user_models[callback.message.chat.id] = model_id
-    await callback.message.edit_text(f"✅ Модель изменена на: {model_id}")
+    chat_id = callback.message.chat.id
+    if model_id == "auto":
+        state.user_models.pop(chat_id, None)
+        selected_label = "AUTO"
+    else:
+        state.user_models[chat_id] = model_id
+        selected_label = model_id
+    state.clear_history(chat_id)
+    await callback.message.edit_text(f"✅ Модель изменена на: {selected_label}\nИстория очищена для чистого переключения.")
     await callback.answer()
 
 
