@@ -2,6 +2,7 @@ MODEL_PRIORITY = [
     {"provider": "github", "model": "gpt-4o", "serious_only": True},
     {"provider": "google", "model": "gemini-2.5-flash-lite"},
     {"provider": "google", "model": "gemini-2.5-flash"},
+    {"provider": "groq", "model": "openai/gpt-oss-120b", "serious_only": True},
     {"provider": "groq", "model": "llama-3.3-70b-versatile"},
     {"provider": "cloudflare", "model": "@cf/moonshotai/kimi-k2.6", "serious_only": True},
     {"provider": "google", "model": "gemma-3-27b-it"},
@@ -35,9 +36,10 @@ MODEL_RATING_TEXT = (
     "1. <code>gemini-2.5-flash-lite</code> — ответ по умолчанию\n"
     "2. <code>gpt-4o</code> — авто-подъем для сложных запросов\n"
     "3. <code>gemini-2.5-flash</code> — запасной Google fallback\n"
-    "4. <code>llama-3.3-70b-versatile</code>\n"
-    "5. <code>kimi-k2.6</code> — резервный multimodal fallback\n"
-    "6. <code>gemma-3-27b-it</code> — крайний резерв\n"
+    "4. <code>openai/gpt-oss-120b</code> — только добавил\n"
+    "5. <code>llama-3.3-70b-versatile</code>\n"
+    "6. <code>kimi-k2.6</code> — резервный multimodal fallback\n"
+    "7. <code>gemma-3-27b-it</code> — крайний резерв\n"
 )
 
 SYSTEM_PROMPT = """Сейчас твоя роль: {my_name}. Ты работаешь в Telegram-боте DummyLLM вместе с другими моделями.
