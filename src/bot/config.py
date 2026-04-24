@@ -23,8 +23,8 @@ VISION_MODELS = {"gemini-2.5-flash", "gpt-4o", "@cf/moonshotai/kimi-k2.6"}
 
 SERIOUS_FALLBACK_ORDER = [
     "gemini-2.5-flash-lite",
-    "gpt-4o",
     "gemini-2.5-flash",
+    "gpt-4o",
     "llama-3.3-70b-versatile",
     "@cf/moonshotai/kimi-k2.6",
     "gemma-3-27b-it",

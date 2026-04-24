@@ -390,6 +390,8 @@ def _estimate_confidence(user_input: str, text: str, analysis: dict[str, Any], s
     lower_text = text.lower()
     if any(marker in lower_text for marker in LOW_CONFIDENCE_MARKERS):
         return "low"
+    if _looks_incomplete_answer(text):
+        return "medium"
     if analysis["is_complex"] and len(text) < 260:
         return "low"
     if analysis["needs_search"] and not search_enabled:
@@ -404,6 +406,27 @@ def _estimate_confidence(user_input: str, text: str, analysis: dict[str, Any], s
 def _log_provider_cooldown(provider: str, cooldown_seconds: float, reason: str) -> None:
     if cooldown_seconds > 0:
         logger.warning("Provider %s cooldown for %.0fs after %s", provider, cooldown_seconds, reason)
+
+
+def _looks_incomplete_answer(text: str) -> bool:
+    stripped = text.rstrip()
+    if not stripped:
+        return False
+
+    if stripped.endswith((":", "(", "[", "{", "-", "—")):
+        return True
+
+    last_line = stripped.splitlines()[-1].strip()
+    if not last_line:
+        return False
+
+    if re.match(r"^[•⦁*-]\s+\S+", last_line) and not re.search(r"[.!?…»\])\"]$", last_line):
+        return True
+
+    if len(last_line) <= 18 and not re.search(r"[.!?…»\])\"]$", last_line):
+        return True
+
+    return False
 
 
 def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
@@ -787,6 +810,39 @@ async def _build_answer_plan(
     return plan_text or None
 
 
+async def _continue_incomplete_answer(
+    provider: str,
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    partial_answer: str,
+) -> str | None:
+    continuation_prompt = (
+        "Continue the answer exactly from where it stopped. "
+        "Do not restart, do not repeat earlier sentences, and finish the thought cleanly.\n\n"
+        f"User request:\n{user_input}\n\n"
+        f"Partial answer:\n{partial_answer}"
+    )
+    continuation = await _ask_model(
+        provider,
+        chat_id,
+        model_id,
+        continuation_prompt,
+        system_instruction,
+        use_tools=False,
+        temperature=0.2,
+        max_tokens=900,
+    )
+    if not continuation or not continuation.get("text"):
+        return None
+    extra = str(continuation["text"]).strip()
+    if not extra:
+        return None
+    joiner = "" if partial_answer.endswith(("\n", " ")) else " "
+    return partial_answer + joiner + extra
+
+
 async def _critic_and_refine(
     chat_id: int,
     user_input: str,
@@ -869,23 +925,21 @@ def _build_response_mode_label(
     critic_used: bool,
     search_enabled: bool,
 ) -> str:
-    parts: list[str] = []
-    parts.append("manual" if manually_selected else "auto")
-    if mode == MODE_SERIOUS:
-        if analysis["needs_search"]:
-            parts.append("search-gated")
-        if analysis["is_complex"]:
-            parts.append("complex")
-    if plan_used:
-        parts.append("plan")
-    if critic_used:
-        parts.append("critic")
-        parts.append("self-refine")
+    route_mode = "вручную" if manually_selected else "авто"
+    answer_type = "быстрый ответ"
     if search_enabled:
-        parts.append("search")
-    parts.append(f"conf:{confidence}")
-    parts.append(used_model)
-    return " | ".join(parts)
+        answer_type = "с поиском"
+    elif critic_used or confidence == "high":
+        answer_type = "проверенный ответ"
+
+    return json.dumps(
+        {
+            "route_mode": route_mode,
+            "answer_type": answer_type,
+            "model": used_model,
+        },
+        ensure_ascii=False,
+    )
 
 
 async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[str, str] | None:
@@ -908,7 +962,7 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
             continue
 
         system_instruction = _build_system_instruction(chat_id, mode, model_id, profile, analysis)
-        max_tokens = 1400 if analysis["is_complex"] else 900
+        max_tokens = 2600 if analysis["is_complex"] or manually_selected else 1600
         temperature = 0.2 if mode == MODE_SERIOUS else 0.5
         plan_text: str | None = None
         plan_used = False
@@ -943,6 +997,18 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 logger.warning("Discarding garbled response from %s", model_id)
                 _log_provider_cooldown(provider, cooldown, "garbled output")
                 continue
+
+            if _looks_incomplete_answer(text):
+                continued_text = await _continue_incomplete_answer(
+                    provider,
+                    chat_id,
+                    model_id,
+                    user_input,
+                    system_instruction,
+                    text,
+                )
+                if continued_text and not _looks_garbled_text(continued_text):
+                    text = continued_text
 
             confidence = _estimate_confidence(user_input, text, analysis, search_enabled)
             if confidence == "low" and provider != "github" and not manually_selected:

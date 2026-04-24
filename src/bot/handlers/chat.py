@@ -1,3 +1,5 @@
+import json
+
 from aiogram import F, Router, types
 
 from ..config import MENU_CHANGE_MODE, MENU_CHANGE_MODEL, MENU_CLEAR_HISTORY, MODE_SERIOUS
@@ -46,15 +48,24 @@ async def handle_message(message: types.Message) -> None:
     used_model = result["used_model"]
     response_text_to_save = result["save_text"]
     requested_name = result["requested_name"]
-    response_mode = result.get("response_mode", "")
-    confidence = result.get("confidence", "")
+    response_meta_raw = result.get("response_mode", "{}")
+    try:
+        response_meta = json.loads(response_meta_raw)
+    except Exception:
+        response_meta = {}
 
     mode_indicator = "🧐 [Стандартный]" if mode == MODE_SERIOUS else "🤪 [RolePlay]"
-    meta_line = f"Mode: {response_mode}"
-    if confidence:
-        meta_line += f" | confidence: {confidence}"
+    route_mode = response_meta.get("route_mode", "авто")
+    answer_type = response_meta.get("answer_type", "быстрый ответ")
+    model_label = response_meta.get("model", used_model)
 
-    raw_full_text = f"🤖 **[{used_model}]** {mode_indicator}\n{meta_line}\n\n{final_text}"
+    meta_block = (
+        f"Режим: {route_mode}\n"
+        f"Модель: {model_label}\n"
+        f"Тип ответа: {answer_type}"
+    )
+
+    raw_full_text = f"🤖 **[{used_model}]** {mode_indicator}\n{meta_block}\n\n{final_text}"
     if requested_name and requested_name.lower() not in used_model.lower():
         fallback_name = used_model.split("-")[0].capitalize()
         raw_full_text += (
