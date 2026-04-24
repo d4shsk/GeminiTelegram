@@ -111,7 +111,7 @@ def _table_to_mobile_cards(table_lines: list[str]) -> list[str]:
         title_header = headers[0] or "Пункт"
 
         if cards:
-            cards.append("")
+            cards.extend(["", ""])
 
         cards.append(f"**{title_header}: {title}**")
         for header, value in zip(headers[1:], normalized_row[1:]):
