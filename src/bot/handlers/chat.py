@@ -54,18 +54,13 @@ async def handle_message(message: types.Message) -> None:
     except Exception:
         response_meta = {}
 
-    mode_indicator = "🧐 [Стандартный]" if mode == MODE_SERIOUS else "🤪 [RolePlay]"
-    route_mode = response_meta.get("route_mode", "авто")
     answer_type = response_meta.get("answer_type", "быстрый ответ")
-    model_label = response_meta.get("model", used_model)
+    if mode == MODE_SERIOUS:
+        header = f"🤖 **[{used_model}]** 🧐 [{answer_type}]"
+    else:
+        header = f"🤖 **[{used_model}]** 🤪 [RolePlay]"
 
-    meta_block = (
-        f"Режим: {route_mode}\n"
-        f"Модель: {model_label}\n"
-        f"Тип ответа: {answer_type}"
-    )
-
-    raw_full_text = f"🤖 **[{used_model}]** {mode_indicator}\n{meta_block}\n\n{final_text}"
+    raw_full_text = f"{header}\n\n{final_text}"
     if requested_name and requested_name.lower() not in used_model.lower():
         fallback_name = used_model.split("-")[0].capitalize()
         raw_full_text += (
