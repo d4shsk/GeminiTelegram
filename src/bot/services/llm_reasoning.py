@@ -1,9 +1,15 @@
 import json
 from typing import Any
 
-from ..runtime import logger, runtime
+from ..config import MODEL_PRIORITY
+from ..runtime import runtime
 from ..state import state
-from .llm_clients import ask_github, ask_model, is_rate_limit_error, log_provider_cooldown
+from .llm_clients import ask_model, is_rate_limit_error, log_provider_cooldown
+
+CRITIC_MODELS = (
+    ("google", "gemini-2.5-flash"),
+    ("cloudflare", "@cf/moonshotai/kimi-k2.6"),
+)
 
 
 def _build_plan_prompt(user_input: str) -> str:
@@ -14,14 +20,25 @@ def _build_plan_prompt(user_input: str) -> str:
     )
 
 
-def merge_user_prompt(user_input: str, plan: str | None) -> str:
-    if not plan:
-        return user_input
-    return (
-        f"User request:\n{user_input}\n\n"
-        f"Internal answer plan:\n{plan}\n\n"
-        "Write only the final answer for the user. Do not expose the internal plan unless it is directly useful."
-    )
+def merge_user_prompt(user_input: str, plan: str | None, goal_contract: dict[str, Any] | None = None) -> str:
+    sections = [f"User request:\n{user_input}"]
+
+    if goal_contract:
+        sections.append(
+            "Practical reasoning guardrails:\n"
+            f"- Goal: {goal_contract.get('goal', '')}\n"
+            f"- Required objects: {', '.join(goal_contract.get('required_objects', [])) or 'none'}\n"
+            f"- Must remain true: {', '.join(goal_contract.get('must_remain_true', [])) or 'none'}\n"
+            f"- Invalid outcomes: {', '.join(goal_contract.get('invalid_outcomes', [])) or 'none'}\n"
+            "- Internally verify that your advice still lets the user achieve the goal.\n"
+            "- If one option breaks the goal, reject it and explain briefly why."
+        )
+
+    if plan:
+        sections.append(f"Internal answer plan:\n{plan}")
+
+    sections.append("Write only the final answer for the user. Do not expose the internal plan.")
+    return "\n\n".join(sections)
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -174,10 +191,12 @@ async def apply_goal_guard(
     guard_prompt = (
         "Check whether the draft answer preserves the user's real-world goal. "
         "Return strict JSON with keys:\n"
-        "is_consistent: boolean\n"
+        'verdict: "pass" | "rewrite" | "fail"\n'
         "problem: string\n"
         "rewritten_answer: string\n\n"
-        "If the draft is already goal-consistent, keep rewritten_answer empty.\n\n"
+        "Use verdict=fail when the draft breaks the goal and you cannot repair it safely.\n"
+        "Use verdict=rewrite only when you can fix the answer directly.\n"
+        "If the draft is already goal-consistent, use verdict=pass and keep rewritten_answer empty.\n\n"
         f"Goal contract:\n{json.dumps(goal_contract, ensure_ascii=False)}\n\n"
         f"User request:\n{user_input}\n\n"
         f"Draft answer:\n{draft_answer}"
@@ -199,11 +218,111 @@ async def apply_goal_guard(
     if not isinstance(payload, dict):
         return None
 
+    verdict = str(payload.get("verdict", "fail")).strip().lower()
+    if verdict not in {"pass", "rewrite", "fail"}:
+        verdict = "fail"
+
     rewritten_answer = str(payload.get("rewritten_answer", "")).strip()
     return {
-        "is_consistent": bool(payload.get("is_consistent")),
+        "verdict": verdict,
         "problem": str(payload.get("problem", "")).strip(),
         "rewritten_answer": rewritten_answer,
+    }
+
+
+def _critic_candidates(draft_model: str) -> list[tuple[str, str]]:
+    model_provider = {item["model"]: item["provider"] for item in MODEL_PRIORITY}
+    candidates: list[tuple[str, str]] = []
+
+    if draft_model in model_provider and draft_model in {model_id for _, model_id in CRITIC_MODELS}:
+        candidates.append((model_provider[draft_model], draft_model))
+
+    for provider, model_id in CRITIC_MODELS:
+        if (provider, model_id) not in candidates:
+            candidates.append((provider, model_id))
+    return candidates
+
+
+async def _run_critic(
+    chat_id: int,
+    prompt: str,
+    draft_model: str,
+) -> dict[str, Any] | None:
+    for provider, critic_model in _critic_candidates(draft_model):
+        if not runtime.is_provider_available(provider):
+            continue
+
+        try:
+            critic_response = await ask_model(
+                provider,
+                chat_id,
+                critic_model,
+                prompt,
+                "You are a concise response critic. Output strict JSON only.",
+                use_tools=False,
+                temperature=0.1,
+                max_tokens=900,
+            )
+        except Exception as error:
+            rate_limited = is_rate_limit_error(error)
+            cooldown = runtime.mark_provider_failure(provider, rate_limited=rate_limited)
+            log_provider_cooldown(provider, cooldown, f"critic failure on {critic_model}")
+            continue
+
+        if not critic_response or not critic_response.get("text"):
+            continue
+
+        payload = _extract_json_object(str(critic_response["text"]))
+        if not isinstance(payload, dict):
+            continue
+
+        runtime.mark_provider_success(provider)
+        payload["_checker_model"] = critic_model
+        payload["_self_check"] = critic_model == draft_model
+        return payload
+
+    return None
+
+
+async def review_practical_answer(
+    chat_id: int,
+    user_input: str,
+    draft_answer: str,
+    goal_contract: dict[str, Any],
+    draft_model: str,
+) -> dict[str, Any] | None:
+    reviewer_prompt = (
+        "Review the draft answer for practical reasoning correctness. Return strict JSON with keys:\n"
+        'verdict: "pass" | "rewrite" | "fail"\n'
+        "reason: string\n"
+        "improved_answer: string\n"
+        'confidence: "high" | "medium" | "low"\n\n'
+        "Use fail when the draft breaks the user's goal or drops a required object.\n"
+        "Use rewrite when the answer can be fixed directly.\n"
+        "Use pass only when the answer clearly preserves the goal.\n\n"
+        f"Goal contract:\n{json.dumps(goal_contract, ensure_ascii=False)}\n\n"
+        f"User request:\n{user_input}\n\n"
+        f"Draft answer:\n{draft_answer}"
+    )
+    payload = await _run_critic(chat_id, reviewer_prompt, draft_model)
+    if not payload:
+        return None
+
+    verdict = str(payload.get("verdict", "fail")).strip().lower()
+    if verdict not in {"pass", "rewrite", "fail"}:
+        verdict = "fail"
+
+    confidence = str(payload.get("confidence", "medium")).lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+
+    return {
+        "verdict": verdict,
+        "reason": str(payload.get("reason", "")).strip(),
+        "improved_answer": str(payload.get("improved_answer", "")).strip(),
+        "confidence": confidence,
+        "checker_model": str(payload.get("_checker_model", "")).strip(),
+        "self_check": bool(payload.get("_self_check")),
     }
 
 
@@ -216,9 +335,6 @@ async def critic_and_refine(
     route_mode: str,
     draft_model: str,
 ) -> dict[str, Any] | None:
-    if not runtime.github_client or not runtime.is_provider_available("github"):
-        return None
-
     critic_prompt = (
         "Review the draft answer. Return a strict JSON object with keys:\n"
         'confidence: "high" | "medium" | "low"\n'
@@ -236,30 +352,10 @@ async def critic_and_refine(
         f"Draft answer:\n{draft_answer}"
     )
 
-    try:
-        critic_response = await ask_github(
-            chat_id,
-            "gpt-4o",
-            critic_prompt,
-            "You are a concise response critic. Output strict JSON only.",
-            use_tools=False,
-            temperature=0.1,
-            max_tokens=900,
-        )
-    except Exception as error:
-        rate_limited = is_rate_limit_error(error)
-        cooldown = runtime.mark_provider_failure("github", rate_limited=rate_limited)
-        log_provider_cooldown("github", cooldown, "critic failure")
-        return None
-
-    if not critic_response or not critic_response.get("text"):
-        return None
-
-    payload = _extract_json_object(critic_response["text"])
+    payload = await _run_critic(chat_id, critic_prompt, draft_model)
     if not payload:
         return None
 
-    runtime.mark_provider_success("github")
     profile_updates = _sanitize_profile_updates(payload.get("profile_updates"))
     if profile_updates:
         state.update_user_profile(chat_id, profile_updates)
@@ -275,4 +371,6 @@ async def critic_and_refine(
         "reason": str(payload.get("reason", "")).strip(),
         "improved_answer": improved_answer,
         "profile_updates": profile_updates,
+        "checker_model": str(payload.get("_checker_model", "")).strip(),
+        "self_check": bool(payload.get("_self_check")),
     }

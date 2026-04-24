@@ -23,6 +23,7 @@ from .llm_reasoning import (
     critic_and_refine,
     extract_goal_contract,
     merge_user_prompt,
+    review_practical_answer,
 )
 
 
@@ -61,7 +62,7 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 if plan_text:
                     plan_used = True
 
-            if mode == MODE_SERIOUS and analysis["practical_reasoning"] and is_weak_reasoning_model(model_id):
+            if mode == MODE_SERIOUS and analysis["practical_reasoning"]:
                 try:
                     goal_contract = await extract_goal_contract(
                         provider,
@@ -77,7 +78,7 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 provider,
                 chat_id,
                 model_id,
-                merge_user_prompt(user_input, plan_text),
+                merge_user_prompt(user_input, plan_text, goal_contract),
                 system_instruction,
                 use_tools=analysis["needs_search"],
                 temperature=temperature,
@@ -107,7 +108,7 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 if continued_text and not looks_garbled_text(continued_text):
                     text = continued_text
 
-            if goal_contract:
+            if goal_contract and is_weak_reasoning_model(model_id):
                 try:
                     goal_guard = await apply_goal_guard(
                         provider,
@@ -121,10 +122,11 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 except Exception as error:
                     logger.info("Goal guard skipped for %s: %s", model_id, str(error)[:100])
                     goal_guard = None
-                if goal_guard and not goal_guard["is_consistent"]:
+                if goal_guard and goal_guard["verdict"] != "pass":
                     rewritten_answer = str(goal_guard["rewritten_answer"]).strip()
                     if (
-                        rewritten_answer
+                        goal_guard["verdict"] == "rewrite"
+                        and rewritten_answer
                         and not looks_garbled_text(rewritten_answer)
                         and not is_duplicate_or_echo(text, rewritten_answer)
                     ):
@@ -135,15 +137,47 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                         continue
 
             confidence = estimate_confidence(user_input, text, analysis, search_enabled)
-            if confidence == "low" and provider != "github" and not manually_selected:
-                logger.info("Escalating from %s due to low draft confidence", model_id)
-                continue
 
             final_text = text
             critic_used = False
-            final_model = model_id
+            checker_model = ""
+            self_check = False
 
-            if analysis["needs_critic"]:
+            if analysis["practical_reasoning"] and goal_contract:
+                practical_review = await review_practical_answer(
+                    chat_id,
+                    user_input,
+                    final_text,
+                    goal_contract,
+                    model_id,
+                )
+                if not practical_review:
+                    logger.info("Escalating from %s because practical reviewer was unavailable", model_id)
+                    continue
+
+                critic_used = True
+                checker_model = str(practical_review.get("checker_model", "")).strip()
+                self_check = bool(practical_review.get("self_check"))
+                confidence = str(practical_review.get("confidence", confidence))
+                verdict = str(practical_review.get("verdict", "fail")).strip().lower()
+                improved_answer = str(practical_review.get("improved_answer", "")).strip()
+
+                if (
+                    verdict == "rewrite"
+                    and improved_answer
+                    and not looks_garbled_text(improved_answer)
+                    and not is_duplicate_or_echo(final_text, improved_answer)
+                ):
+                    final_text = improved_answer
+                elif verdict != "pass":
+                    logger.info("Escalating from %s due to practical reviewer verdict=%s", model_id, verdict)
+                    continue
+
+            if confidence == "low" and not manually_selected:
+                logger.info("Escalating from %s due to low draft confidence", model_id)
+                continue
+
+            if analysis["needs_critic"] and not analysis["practical_reasoning"]:
                 critic_result = await critic_and_refine(
                     chat_id,
                     user_input,
@@ -154,28 +188,31 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                     model_id,
                 )
                 if critic_result:
+                    critic_used = True
                     confidence = critic_result["confidence"]
+                    checker_model = str(critic_result.get("checker_model", "")).strip()
+                    self_check = bool(critic_result.get("self_check"))
                     improved_answer = critic_result["improved_answer"]
                     if improved_answer:
                         final_text = improved_answer
-                        critic_used = True
-                        final_model = f"{model_id} -> gpt-4o critic"
 
             runtime.mark_provider_success(provider)
             response_mode = build_response_mode_label(
                 mode,
                 manually_selected,
                 analysis,
-                final_model,
+                model_id,
                 confidence,
                 plan_used=plan_used,
                 critic_used=critic_used,
                 search_enabled=search_enabled,
+                checker_model=checker_model,
+                self_check=self_check,
             )
 
             return {
                 "text": final_text,
-                "used_model": final_model,
+                "used_model": model_id,
                 "save_text": final_text,
                 "requested_name": requested_name or "",
                 "response_mode": response_mode,

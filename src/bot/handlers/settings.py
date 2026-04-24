@@ -15,7 +15,7 @@ async def cmd_model(message: types.Message) -> None:
     if state.user_modes.get(chat_id) != MODE_SERIOUS:
         await message.answer("Команда /model доступна только в серьезном режиме. Выберите режим через /start.")
         return
-    await message.answer(model_picker_text(), reply_markup=build_model_picker(), parse_mode="HTML")
+    await message.answer(model_picker_text(), reply_markup=build_model_picker(MODE_SERIOUS), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("setmodel_"))
@@ -26,6 +26,12 @@ async def handle_model_selection(callback: CallbackQuery) -> None:
 
     model_id = callback.data.split("_", 1)[1]
     chat_id = callback.message.chat.id
+    mode = state.user_modes.get(chat_id, MODE_SERIOUS)
+
+    if mode == MODE_SERIOUS and model_id == "gemma-3-27b-it":
+        await callback.answer("Gemma недоступна в серьезном режиме.", show_alert=True)
+        return
+
     if model_id == "auto":
         state.user_models.pop(chat_id, None)
         selected_label = "AUTO"
@@ -33,7 +39,9 @@ async def handle_model_selection(callback: CallbackQuery) -> None:
         state.user_models[chat_id] = model_id
         selected_label = model_id
     state.clear_history(chat_id)
-    await callback.message.edit_text(f"✅ Модель изменена на: {selected_label}\nИстория очищена для чистого переключения.")
+    await callback.message.edit_text(
+        f"✅ Модель изменена на: {selected_label}\nИстория очищена для чистого переключения."
+    )
     await callback.answer()
 
 

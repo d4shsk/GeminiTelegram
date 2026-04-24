@@ -30,7 +30,7 @@ async def handle_message(message: types.Message) -> None:
         if mode != MODE_SERIOUS:
             await message.answer("Выбор модели доступен только в серьезном режиме.")
         else:
-            await message.answer(model_picker_text(), reply_markup=build_model_picker(), parse_mode="HTML")
+            await message.answer(model_picker_text(), reply_markup=build_model_picker(mode), parse_mode="HTML")
         return
 
     if user_input == MENU_CLEAR_HISTORY:

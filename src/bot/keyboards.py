@@ -9,6 +9,7 @@ from .config import (
     MENU_CHANGE_MODE,
     MENU_CHANGE_MODEL,
     MENU_CLEAR_HISTORY,
+    MODE_SERIOUS,
     MODEL_PRIORITY,
     MODEL_RATING_TEXT,
 )
@@ -27,17 +28,19 @@ def build_main_menu() -> ReplyKeyboardMarkup:
 def build_mode_picker() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Шуточный режим (RolePlay)🤪", callback_data="mode_worker")],
+            [InlineKeyboardButton(text="Шуточный режим (RolePlay) 🤪", callback_data="mode_worker")],
             [InlineKeyboardButton(text="Серьезный режим 🧐", callback_data="mode_serious")],
         ]
     )
 
 
-def build_model_buttons() -> list[list[InlineKeyboardButton]]:
+def build_model_buttons(mode: str = MODE_SERIOUS) -> list[list[InlineKeyboardButton]]:
     buttons: list[list[InlineKeyboardButton]] = [
         [InlineKeyboardButton(text="AUTO", callback_data="setmodel_auto")]
     ]
     for model_info in MODEL_PRIORITY:
+        if mode == MODE_SERIOUS and model_info["model"] == "gemma-3-27b-it":
+            continue
         label = model_info["model"].replace(":free", "")
         if model_info.get("serious_only"):
             label = "🔬 " + label
@@ -45,9 +48,13 @@ def build_model_buttons() -> list[list[InlineKeyboardButton]]:
     return buttons
 
 
-def build_model_picker() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=build_model_buttons())
+def build_model_picker(mode: str = MODE_SERIOUS) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=build_model_buttons(mode))
 
 
 def model_picker_text() -> str:
-    return "Выберите модель:\n<code>AUTO</code> — бот сам выбирает между flash-lite и gpt-4o.\n" + MODEL_RATING_TEXT
+    return (
+        "Выберите модель:\n"
+        "<code>AUTO</code> — бот сам выбирает между flash-lite и gpt-4o.\n"
+        + MODEL_RATING_TEXT
+    )

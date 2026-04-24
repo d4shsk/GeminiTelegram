@@ -453,19 +453,23 @@ def build_response_mode_label(
     plan_used: bool,
     critic_used: bool,
     search_enabled: bool,
+    checker_model: str = "",
+    self_check: bool = False,
 ) -> str:
     route_mode = "РІСЂСѓС‡РЅСѓСЋ" if manually_selected else "Р°РІС‚Рѕ"
     answer_type = "Р±С‹СЃС‚СЂС‹Р№ РѕС‚РІРµС‚"
     if search_enabled:
         answer_type = "СЃ РїРѕРёСЃРєРѕРј"
-    elif critic_used or confidence == "high":
-        answer_type = "РїСЂРѕРІРµСЂРµРЅРЅС‹Р№ РѕС‚РІРµС‚"
+    elif critic_used:
+        answer_type = "СЃР°РјРѕРїСЂРѕРІРµСЂРєР°" if self_check else f"РїСЂРѕРІРµСЂРµРЅРѕ: {checker_model}"
 
     return json.dumps(
         {
             "route_mode": route_mode,
             "answer_type": answer_type,
             "model": used_model,
+            "checker_model": checker_model,
+            "self_check": self_check,
         },
         ensure_ascii=False,
     )

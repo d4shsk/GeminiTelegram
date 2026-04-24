@@ -42,7 +42,7 @@ async def handle_mode_selection(callback: CallbackQuery) -> None:
             "✅ Выбран серьезный режим. История очищена.\n"
             "По умолчанию включен AUTO: бот сам выбирает между быстрым, сильным и fallback-маршрутом."
             + model_picker_text().replace("Выберите модель:", "\n\nВыберите модель или оставьте AUTO:"),
-            reply_markup=build_model_picker(),
+            reply_markup=build_model_picker(mode),
             parse_mode="HTML",
         )
         await callback.message.answer("Меню всегда под рукой 👇", reply_markup=build_main_menu())
