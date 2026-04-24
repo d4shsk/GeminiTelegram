@@ -5,10 +5,11 @@ from typing import Any
 from google import genai
 import openai as openai_lib
 
-from ..config import SEARCH_TOOLS
+from ..config import CALCULATOR_TOOL, SEARCH_TOOLS
 from ..runtime import logger, runtime
 from ..state import state
 from ..utils import moscow_datetime
+from .calculator import CalculatorError, calculate_expression
 from .search import perform_web_search
 
 
@@ -65,25 +66,45 @@ def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
 async def _apply_search_tools(history: list[dict[str, Any]], tool_calls: Any) -> bool:
     used_search = False
     for tool_call in tool_calls:
-        if tool_call.function.name != "search_internet":
-            continue
-        used_search = True
+        tool_name = tool_call.function.name
         try:
             args = json.loads(tool_call.function.arguments)
-            search_query = args.get("query", "")
         except Exception:
-            search_query = ""
-        logger.info("Tool call search_internet: %s", search_query)
-        result = await perform_web_search(search_query)
+            args = {}
+
+        if tool_name == "search_internet":
+            used_search = True
+            search_query = args.get("query", "")
+            logger.info("Tool call search_internet: %s", search_query)
+            result = await perform_web_search(search_query)
+        elif tool_name == "calculate":
+            expression = str(args.get("expression", ""))
+            logger.info("Tool call calculate: %s", expression)
+            try:
+                result = calculate_expression(expression)
+            except CalculatorError as error:
+                result = f"calculator_error: {error}"
+        else:
+            continue
+
         history.append(
             {
                 "role": "tool",
                 "tool_call_id": tool_call.id,
-                "name": tool_call.function.name,
+                "name": tool_name,
                 "content": result,
             }
         )
     return used_search
+
+
+def _tool_list(*, use_search_tool: bool, use_calculator_tool: bool) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    if use_search_tool:
+        tools.extend(SEARCH_TOOLS)
+    if use_calculator_tool:
+        tools.append(CALCULATOR_TOOL)
+    return tools
 
 
 async def _ask_google(
@@ -92,7 +113,8 @@ async def _ask_google(
     user_input: str,
     system_instruction: str,
     *,
-    use_tools: bool,
+    use_search_tool: bool,
+    use_calculator_tool: bool,
     temperature: float,
     max_tokens: int,
 ) -> dict[str, Any] | None:
@@ -113,7 +135,7 @@ async def _ask_google(
         "temperature": temperature,
         "max_output_tokens": max_tokens,
     }
-    if use_tools:
+    if use_search_tool:
         config_data["tools"] = [{"google_search": {}}]
     if system_instruction:
         config_data["system_instruction"] = system_instruction
@@ -121,7 +143,7 @@ async def _ask_google(
     chat = runtime.gemini_client.aio.chats.create(model=model_id, config=config, history=history)
     response = await asyncio.wait_for(chat.send_message(user_input), timeout=15.0)
     text = (response.text or "").strip()
-    return {"text": text or None, "search_enabled": use_tools}
+    return {"text": text or None, "search_enabled": use_search_tool}
 
 
 async def _ask_groq(
@@ -130,7 +152,8 @@ async def _ask_groq(
     user_input: str,
     system_instruction: str,
     *,
-    use_tools: bool,
+    use_search_tool: bool,
+    use_calculator_tool: bool,
     temperature: float,
     max_tokens: int,
 ) -> dict[str, Any] | None:
@@ -147,8 +170,9 @@ async def _ask_groq(
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
-        if use_tools:
-            request_kwargs["tools"] = SEARCH_TOOLS
+        tools = _tool_list(use_search_tool=use_search_tool, use_calculator_tool=use_calculator_tool)
+        if tools:
+            request_kwargs["tools"] = tools
             request_kwargs["tool_choice"] = "auto"
         response = await asyncio.wait_for(
             runtime.groq_client.chat.completions.create(**request_kwargs),
@@ -156,7 +180,7 @@ async def _ask_groq(
         )
         response_message = response.choices[0].message
         used_search = False
-        if use_tools and response_message.tool_calls:
+        if tools and response_message.tool_calls:
             history.append(
                 {
                     "role": "assistant",
@@ -200,7 +224,8 @@ async def _ask_cloudflare(
     user_input: str,
     system_instruction: str,
     *,
-    use_tools: bool,
+    use_search_tool: bool,
+    use_calculator_tool: bool,
     temperature: float,
     max_tokens: int,
 ) -> dict[str, Any] | None:
@@ -252,7 +277,8 @@ async def ask_github(
     user_input: str,
     system_instruction: str,
     *,
-    use_tools: bool,
+    use_search_tool: bool,
+    use_calculator_tool: bool,
     temperature: float,
     max_tokens: int,
 ) -> dict[str, Any] | None:
@@ -268,8 +294,9 @@ async def ask_github(
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    if use_tools:
-        request_kwargs["tools"] = SEARCH_TOOLS
+    tools = _tool_list(use_search_tool=use_search_tool, use_calculator_tool=use_calculator_tool)
+    if tools:
+        request_kwargs["tools"] = tools
         request_kwargs["tool_choice"] = "auto"
 
     response = await asyncio.wait_for(
@@ -278,7 +305,7 @@ async def ask_github(
     )
     message = response.choices[0].message
     used_search = False
-    if use_tools and message.tool_calls:
+    if tools and message.tool_calls:
         history.append(
             {
                 "role": "assistant",
@@ -308,7 +335,8 @@ async def ask_model(
     user_input: str,
     system_instruction: str,
     *,
-    use_tools: bool,
+    use_search_tool: bool,
+    use_calculator_tool: bool,
     temperature: float,
     max_tokens: int,
 ) -> dict[str, Any] | None:
@@ -318,7 +346,8 @@ async def ask_model(
             model_id,
             user_input,
             system_instruction,
-            use_tools=use_tools,
+            use_search_tool=use_search_tool,
+            use_calculator_tool=use_calculator_tool,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -328,7 +357,8 @@ async def ask_model(
             model_id,
             user_input,
             system_instruction,
-            use_tools=use_tools,
+            use_search_tool=use_search_tool,
+            use_calculator_tool=use_calculator_tool,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -338,7 +368,8 @@ async def ask_model(
             model_id,
             user_input,
             system_instruction,
-            use_tools=use_tools,
+            use_search_tool=use_search_tool,
+            use_calculator_tool=use_calculator_tool,
             temperature=temperature,
             max_tokens=max_tokens,
         )
@@ -348,7 +379,8 @@ async def ask_model(
             model_id,
             user_input,
             system_instruction,
-            use_tools=use_tools,
+            use_search_tool=use_search_tool,
+            use_calculator_tool=use_calculator_tool,
             temperature=temperature,
             max_tokens=max_tokens,
         )

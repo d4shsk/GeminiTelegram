@@ -74,3 +74,25 @@ SEARCH_TOOLS = [
         },
     }
 ]
+
+CALCULATOR_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "calculate",
+        "description": (
+            "Evaluate a mathematical expression deterministically. "
+            "Use this for arithmetic and exact calculations instead of mental math. "
+            "Supported notation: n! means factorial, !n means subfactorial."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "Math expression to evaluate. Example: (2+3)^2 is written as (2+3)**2, 7! is factorial, !7 is subfactorial.",
+                }
+            },
+            "required": ["expression"],
+        },
+    },
+}

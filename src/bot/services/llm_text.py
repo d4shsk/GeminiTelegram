@@ -80,7 +80,8 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 model_id,
                 merge_user_prompt(user_input, plan_text, goal_contract),
                 system_instruction,
-                use_tools=analysis["needs_search"],
+                use_search_tool=analysis["needs_search"],
+                use_calculator_tool=True,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )

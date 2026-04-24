@@ -97,7 +97,8 @@ async def build_answer_plan(
         model_id,
         _build_plan_prompt(user_input),
         system_instruction,
-        use_tools=False,
+        use_search_tool=False,
+        use_calculator_tool=False,
         temperature=0.1,
         max_tokens=220,
     )
@@ -120,7 +121,8 @@ async def extract_goal_contract(
         model_id,
         _build_goal_prompt(user_input),
         system_instruction,
-        use_tools=False,
+        use_search_tool=False,
+        use_calculator_tool=False,
         temperature=0.1,
         max_tokens=260,
     )
@@ -166,7 +168,8 @@ async def continue_incomplete_answer(
         model_id,
         continuation_prompt,
         system_instruction,
-        use_tools=False,
+        use_search_tool=False,
+        use_calculator_tool=False,
         temperature=0.2,
         max_tokens=900,
     )
@@ -207,7 +210,8 @@ async def apply_goal_guard(
         model_id,
         guard_prompt,
         system_instruction,
-        use_tools=False,
+        use_search_tool=False,
+        use_calculator_tool=False,
         temperature=0.1,
         max_tokens=700,
     )
@@ -259,7 +263,8 @@ async def _run_critic(
                 critic_model,
                 prompt,
                 "You are a concise response critic. Output strict JSON only.",
-                use_tools=False,
+                use_search_tool=False,
+                use_calculator_tool=False,
                 temperature=0.1,
                 max_tokens=900,
             )
