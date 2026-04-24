@@ -24,10 +24,9 @@ async def handle_photo(message: types.Message) -> None:
     selected_model = state.user_models.get(chat_id, "gemini-2.5-flash")
     if selected_model not in VISION_MODELS:
         await message.answer(
-            "📷 Анализ изображения доступен только с моделями "
-            "<code>gemini-2.5-flash</code>, <code>gpt-4o</code> и "
-            "<code>@cf/moonshotai/kimi-k2.6</code>.",
-            parse_mode="HTML",
+            "📷 Анализ изображения доступен для AUTO (он использует `gemini-2.5-flash`), "
+            "`gemini-2.5-flash`, `gpt-4o` и `@cf/moonshotai/kimi-k2.6`.",
+            parse_mode="Markdown",
         )
         return
 
@@ -55,5 +54,5 @@ async def handle_photo(message: types.Message) -> None:
     except asyncio.TimeoutError:
         await message.answer("⏱ Обработка изображения заняла слишком много времени. Попробуй еще раз.")
     except Exception as error:
-        logger.warning("Ошибка Vision %s: %s", selected_model, str(error)[:150])
+        logger.warning("Vision error on %s: %s", selected_model, str(error)[:150])
         await message.answer(f"❌ Ошибка при анализе изображения: {str(error)[:120]}")

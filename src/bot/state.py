@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import threading
@@ -94,6 +95,11 @@ class BotState:
                     chat_id INTEGER PRIMARY KEY,
                     summary TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS chat_profiles (
+                    chat_id INTEGER PRIMARY KEY,
+                    profile_json TEXT NOT NULL
+                );
                 """
             )
             self._connection.commit()
@@ -148,6 +154,40 @@ class BotState:
                 (chat_id,),
             ).fetchone()
         return row["summary"] if row else ""
+
+    def get_user_profile(self, chat_id: int) -> dict[str, Any]:
+        with self._lock:
+            row = self._conn().execute(
+                "SELECT profile_json FROM chat_profiles WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        try:
+            return json.loads(row["profile_json"])
+        except json.JSONDecodeError:
+            return {}
+
+    def update_user_profile(self, chat_id: int, updates: dict[str, Any]) -> dict[str, Any]:
+        if not updates:
+            return self.get_user_profile(chat_id)
+
+        with self._lock:
+            profile = self.get_user_profile(chat_id)
+            merged = {**profile, **updates}
+            for key, value in list(merged.items()):
+                if value is None or value == [] or value == "":
+                    merged.pop(key, None)
+            self._conn().execute(
+                """
+                INSERT INTO chat_profiles (chat_id, profile_json)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET profile_json = excluded.profile_json
+                """,
+                (chat_id, json.dumps(merged, ensure_ascii=False, sort_keys=True)),
+            )
+            self._conn().commit()
+            return merged
 
     def update_history(self, chat_id: int, role: str, text: str) -> None:
         if not text:

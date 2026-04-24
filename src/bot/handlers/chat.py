@@ -46,9 +46,15 @@ async def handle_message(message: types.Message) -> None:
     used_model = result["used_model"]
     response_text_to_save = result["save_text"]
     requested_name = result["requested_name"]
+    response_mode = result.get("response_mode", "")
+    confidence = result.get("confidence", "")
 
     mode_indicator = "🧐 [Стандартный]" if mode == MODE_SERIOUS else "🤪 [RolePlay]"
-    raw_full_text = f"🤖 **[{used_model}]** {mode_indicator}\n\n{final_text}"
+    meta_line = f"Mode: {response_mode}"
+    if confidence:
+        meta_line += f" | confidence: {confidence}"
+
+    raw_full_text = f"🤖 **[{used_model}]** {mode_indicator}\n{meta_line}\n\n{final_text}"
     if requested_name and requested_name.lower() not in used_model.lower():
         fallback_name = used_model.split("-")[0].capitalize()
         raw_full_text += (

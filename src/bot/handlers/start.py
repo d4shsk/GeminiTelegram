@@ -33,15 +33,15 @@ async def handle_mode_selection(callback: CallbackQuery) -> None:
     if mode == MODE_WORKER:
         await callback.message.edit_text(
             "✅ Выбран режим RolePlay.\n"
-            "История очищена. Бот помнит последние 30 сообщений."
+            "История очищена. Бот хранит недавний диалог и краткое резюме более раннего контекста."
         )
         await callback.message.answer("Меню всегда под рукой 👇", reply_markup=build_main_menu())
     else:
         state.user_models.pop(chat_id, None)
         await callback.message.edit_text(
             "✅ Выбран серьезный режим. История очищена.\n"
-            "Выберите предпочитаемую модель (если недоступна, будет fallback):"
-            + model_picker_text().replace("Выберите модель:", ""),
+            "По умолчанию включен AUTO: бот сам выбирает между быстрым, сильным и fallback-маршрутом."
+            + model_picker_text().replace("Выберите модель:", "\n\nВыберите модель или оставьте AUTO:"),
             reply_markup=build_model_picker(),
             parse_mode="HTML",
         )

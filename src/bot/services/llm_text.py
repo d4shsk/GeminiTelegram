@@ -45,9 +45,48 @@ COMPLEX_REQUEST_KEYWORDS = (
     "алгоритм",
     "алгоритма",
 )
+SEARCH_REQUEST_KEYWORDS = (
+    "сегодня",
+    "сейчас",
+    "последн",
+    "новост",
+    "актуаль",
+    "курс",
+    "цена",
+    "цены",
+    "погода",
+    "расписан",
+    "score",
+    "latest",
+    "recent",
+    "today",
+    "current",
+    "news",
+    "price",
+    "version",
+    "release",
+)
+LOW_CONFIDENCE_MARKERS = (
+    "возможно",
+    "кажется",
+    "не уверен",
+    "могу ошибаться",
+    "скорее всего",
+    "не могу проверить",
+    "maybe",
+    "probably",
+    "not sure",
+    "i might be wrong",
+)
+TOPIC_KEYWORDS = {
+    "coding": ("код", "python", "api", "debug", "bug", "refactor", "programming"),
+    "telegram": ("telegram", "бот", "bot", "aiogram"),
+    "llm": ("llm", "model", "модель", "prompt", "gemini", "gpt", "groq", "kimi"),
+    "infra": ("railway", "docker", "deploy", "sqlite", "postgres", "redis", "server"),
+}
 
 
-def _resolve_worker_priority(chat_id: int, user_input: str) -> tuple[list[dict[str, Any]], str | None]:
+def _resolve_worker_priority(chat_id: int, user_input: str) -> tuple[list[dict[str, Any]], str | None, bool]:
     priority = [model for model in MODEL_PRIORITY if not model.get("serious_only")]
     requested_name = None
     text_lower = user_input.lower()
@@ -70,7 +109,7 @@ def _resolve_worker_priority(chat_id: int, user_input: str) -> tuple[list[dict[s
         requested_name = "Gemini"
         priority.sort(key=lambda item: "gemini" not in item["model"].lower())
 
-    return priority, requested_name
+    return priority, requested_name, bool(selected)
 
 
 def _is_complex_request(user_input: str) -> bool:
@@ -113,13 +152,128 @@ def _is_complex_request(user_input: str) -> bool:
     return score >= 3
 
 
-def _resolve_serious_priority(chat_id: int, user_input: str) -> list[dict[str, Any]]:
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def _extract_profile_updates(chat_id: int, user_input: str) -> dict[str, Any]:
+    profile = state.get_user_profile(chat_id)
+    text = user_input.strip()
+    lower_text = text.lower()
+    updates: dict[str, Any] = {}
+
+    if re.search(r"на русском|по-русски|in russian", lower_text):
+        updates["language"] = "ru"
+    elif re.search(r"на английском|in english", lower_text):
+        updates["language"] = "en"
+    else:
+        cyr = len(re.findall(r"[А-Яа-яЁё]", text))
+        lat = len(re.findall(r"[A-Za-z]", text))
+        if cyr > lat * 2 and cyr >= 8:
+            updates["language"] = "ru"
+        elif lat > cyr * 2 and lat >= 8:
+            updates["language"] = "en"
+
+    if re.search(r"коротко|кратко|briefly|concise|без воды", lower_text):
+        updates["verbosity"] = "short"
+    elif re.search(r"подробно|детально|развернуто|in detail|thorough", lower_text):
+        updates["verbosity"] = "detailed"
+
+    if re.search(r"по пунктам|списком|bullet", lower_text):
+        updates["format"] = "bullets"
+    elif re.search(r"обычным текстом|сплошным текстом|plain prose", lower_text):
+        updates["format"] = "prose"
+
+    if re.search(r"сначала вывод|итог сначала|bottom line first|summary first", lower_text):
+        updates["structure"] = "summary_first"
+
+    if re.search(r"без таблиц|no tables", lower_text):
+        updates["tables"] = "avoid"
+    elif re.search(r"с таблиц|таблиц|table", lower_text):
+        updates["tables"] = "allow"
+
+    if re.search(r"с примерами|examples", lower_text):
+        updates["examples"] = "prefer"
+    elif re.search(r"без примеров|no examples", lower_text):
+        updates["examples"] = "avoid"
+
+    if re.search(r"без воды|по делу|direct", lower_text):
+        updates["tone"] = "direct"
+
+    topics = list(profile.get("topics", []))
+    for topic, keywords in TOPIC_KEYWORDS.items():
+        if any(keyword in lower_text for keyword in keywords):
+            topics.append(topic)
+    if topics:
+        updates["topics"] = _dedupe(topics)[:6]
+
+    return updates
+
+
+def _profile_to_prompt(profile: dict[str, Any]) -> str:
+    if not profile:
+        return ""
+
+    lines: list[str] = ["Known user profile:"]
+    if profile.get("language"):
+        lines.append(f"- Preferred language: {profile['language']}")
+    if profile.get("verbosity"):
+        lines.append(f"- Preferred verbosity: {profile['verbosity']}")
+    if profile.get("format"):
+        lines.append(f"- Preferred format: {profile['format']}")
+    if profile.get("structure"):
+        lines.append(f"- Preferred structure: {profile['structure']}")
+    if profile.get("tables"):
+        lines.append(f"- Tables: {profile['tables']}")
+    if profile.get("examples"):
+        lines.append(f"- Examples: {profile['examples']}")
+    if profile.get("tone"):
+        lines.append(f"- Tone: {profile['tone']}")
+    if profile.get("topics"):
+        lines.append(f"- Frequent topics: {', '.join(profile['topics'])}")
+    return "\n".join(lines)
+
+
+def _analyze_request(user_input: str, mode: str, profile: dict[str, Any]) -> dict[str, Any]:
+    lower_text = user_input.lower()
+    is_complex = _is_complex_request(user_input)
+    search_signal = any(keyword in lower_text for keyword in SEARCH_REQUEST_KEYWORDS)
+    code_signal = "```" in user_input or bool(re.search(r"[{}[\]()<>_=/*\\]", user_input))
+
+    needs_search = mode == MODE_SERIOUS and search_signal
+    needs_plan = mode == MODE_SERIOUS and (is_complex or len(user_input) >= 220 or code_signal)
+    needs_critic = mode == MODE_SERIOUS and (is_complex or needs_search or code_signal)
+    confidence_risk = needs_search or is_complex or code_signal
+
+    return {
+        "is_complex": is_complex,
+        "needs_search": needs_search,
+        "needs_plan": needs_plan,
+        "needs_critic": needs_critic,
+        "confidence_risk": confidence_risk,
+        "prefer_strong_model": mode == MODE_SERIOUS and (is_complex or needs_search),
+        "profile_hint": profile.get("verbosity", ""),
+    }
+
+
+def _resolve_serious_priority(
+    chat_id: int, user_input: str, analysis: dict[str, Any]
+) -> tuple[list[dict[str, Any]], str | None, bool]:
     explicit_model_id = state.user_models.get(chat_id)
+    manually_selected = explicit_model_id is not None
+
     if explicit_model_id:
         selected_model_id = explicit_model_id
-    elif _is_complex_request(user_input):
+    elif analysis["prefer_strong_model"]:
         selected_model_id = "gpt-4o"
-        logger.info("Escalating complex request to gpt-4o")
+        logger.info("Escalating request to gpt-4o due to complexity/search risk")
     else:
         selected_model_id = "gemini-2.5-flash-lite"
 
@@ -146,16 +300,20 @@ def _resolve_serious_priority(chat_id: int, user_input: str) -> list[dict[str, A
             resolved.append(model)
             added.add(model["model"])
 
-    return resolved
+    return resolved, None, manually_selected
 
 
-def _build_priority(chat_id: int, user_input: str, mode: str) -> tuple[list[dict[str, Any]], str | None]:
+def _build_priority(
+    chat_id: int, user_input: str, mode: str, analysis: dict[str, Any]
+) -> tuple[list[dict[str, Any]], str | None, bool]:
     if mode == MODE_SERIOUS:
-        return _resolve_serious_priority(chat_id, user_input), None
+        return _resolve_serious_priority(chat_id, user_input, analysis)
     return _resolve_worker_priority(chat_id, user_input)
 
 
-def _build_system_instruction(chat_id: int, mode: str, model_id: str) -> str:
+def _build_system_instruction(
+    chat_id: int, mode: str, model_id: str, profile: dict[str, Any], analysis: dict[str, Any]
+) -> str:
     now = moscow_datetime()
     if mode != MODE_SERIOUS:
         if "gemma" in model_id.lower():
@@ -170,16 +328,24 @@ def _build_system_instruction(chat_id: int, mode: str, model_id: str) -> str:
     else:
         base_instruction = SERIOUS_SYSTEM_PROMPT.format(current_datetime=now)
 
+    profile_prompt = _profile_to_prompt(profile)
     summary = state.get_summary(chat_id)
-    if not summary:
-        return base_instruction
+    extras: list[str] = []
+    if profile_prompt:
+        extras.append(profile_prompt)
+    if summary:
+        extras.append(
+            "Earlier conversation summary:\n"
+            f"{summary}"
+        )
+    if analysis["needs_search"]:
+        extras.append(
+            "If the answer may depend on recent or changing facts, verify before answering rather than guessing."
+        )
 
-    return (
-        f"{base_instruction}\n\n"
-        "Ниже краткое резюме более раннего диалога. Используй его как вспомогательный контекст, "
-        "но приоритет всегда у новых сообщений пользователя.\n"
-        f"{summary}"
-    )
+    if not extras:
+        return base_instruction
+    return f"{base_instruction}\n\n" + "\n\n".join(extras)
 
 
 def _universal_history(chat_id: int) -> list[dict[str, str]]:
@@ -220,35 +386,24 @@ def _looks_garbled_text(text: str) -> bool:
     return suspicious_count >= 2
 
 
+def _estimate_confidence(user_input: str, text: str, analysis: dict[str, Any], search_enabled: bool) -> str:
+    lower_text = text.lower()
+    if any(marker in lower_text for marker in LOW_CONFIDENCE_MARKERS):
+        return "low"
+    if analysis["is_complex"] and len(text) < 260:
+        return "low"
+    if analysis["needs_search"] and not search_enabled:
+        return "medium"
+    if analysis["is_complex"] and len(text) < 450:
+        return "medium"
+    if len(text) < max(90, len(user_input) // 3):
+        return "medium"
+    return "high"
+
+
 def _log_provider_cooldown(provider: str, cooldown_seconds: float, reason: str) -> None:
     if cooldown_seconds > 0:
         logger.warning("Provider %s cooldown for %.0fs after %s", provider, cooldown_seconds, reason)
-
-
-async def _ask_google(chat_id: int, model_id: str, user_input: str, system_instruction: str) -> str | None:
-    if not runtime.gemini_client:
-        return None
-
-    history = _gemini_history(chat_id)
-    if "gemma" in model_id.lower():
-        chat = runtime.gemini_client.aio.chats.create(model=model_id, history=history)
-        current_input = user_input
-        if system_instruction:
-            current_input = f"[{system_instruction}]\n\nСообщение пользователя: {user_input}"
-        response = await asyncio.wait_for(chat.send_message(current_input), timeout=15.0)
-    else:
-        config_data: dict[str, Any] = {
-            "tools": [{"google_search": {}}],
-            "temperature": 0.2,
-        }
-        if system_instruction:
-            config_data["system_instruction"] = system_instruction
-        config = genai.types.GenerateContentConfig(**config_data)
-        chat = runtime.gemini_client.aio.chats.create(model=model_id, config=config, history=history)
-        response = await asyncio.wait_for(chat.send_message(user_input), timeout=15.0)
-
-    text = (response.text or "").strip()
-    return text or None
 
 
 def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
@@ -267,10 +422,12 @@ def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
     return normalized
 
 
-async def _apply_search_tools(history: list[dict[str, Any]], tool_calls: Any) -> None:
+async def _apply_search_tools(history: list[dict[str, Any]], tool_calls: Any) -> bool:
+    used_search = False
     for tool_call in tool_calls:
         if tool_call.function.name != "search_internet":
             continue
+        used_search = True
         try:
             args = json.loads(tool_call.function.arguments)
             search_query = args.get("query", "")
@@ -286,9 +443,106 @@ async def _apply_search_tools(history: list[dict[str, Any]], tool_calls: Any) ->
                 "content": result,
             }
         )
+    return used_search
 
 
-async def _ask_groq(chat_id: int, model_id: str, user_input: str, system_instruction: str) -> str | None:
+def _build_plan_prompt(user_input: str) -> str:
+    return (
+        "Create a short internal answer plan with 3-6 concise bullets. "
+        "Do not answer the user. Focus on checks, structure, and reasoning steps.\n\n"
+        f"User request:\n{user_input}"
+    )
+
+
+def _merge_user_prompt(user_input: str, plan: str | None) -> str:
+    if not plan:
+        return user_input
+    return (
+        f"User request:\n{user_input}\n\n"
+        f"Internal answer plan:\n{plan}\n\n"
+        "Write only the final answer for the user. Do not expose the internal plan unless it is directly useful."
+    )
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    text = text.strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or start >= end:
+            return None
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+
+
+def _sanitize_profile_updates(raw_updates: Any) -> dict[str, Any]:
+    if not isinstance(raw_updates, dict):
+        return {}
+
+    allowed_keys = {"language", "verbosity", "format", "structure", "tables", "examples", "tone", "topics"}
+    sanitized: dict[str, Any] = {}
+    for key, value in raw_updates.items():
+        if key not in allowed_keys:
+            continue
+        if key == "topics" and isinstance(value, list):
+            sanitized[key] = [str(item) for item in value[:6]]
+        elif isinstance(value, (str, int, float, bool)):
+            sanitized[key] = value
+    return sanitized
+
+
+async def _ask_google(
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    *,
+    use_tools: bool,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, Any] | None:
+    if not runtime.gemini_client:
+        return None
+
+    history = _gemini_history(chat_id)
+    if "gemma" in model_id.lower():
+        chat = runtime.gemini_client.aio.chats.create(model=model_id, history=history)
+        current_input = user_input
+        if system_instruction:
+            current_input = f"[{system_instruction}]\n\nUser message: {user_input}"
+        response = await asyncio.wait_for(chat.send_message(current_input), timeout=15.0)
+        text = (response.text or "").strip()
+        return {"text": text or None, "search_enabled": False}
+
+    config_data: dict[str, Any] = {
+        "temperature": temperature,
+        "max_output_tokens": max_tokens,
+    }
+    if use_tools:
+        config_data["tools"] = [{"google_search": {}}]
+    if system_instruction:
+        config_data["system_instruction"] = system_instruction
+    config = genai.types.GenerateContentConfig(**config_data)
+    chat = runtime.gemini_client.aio.chats.create(model=model_id, config=config, history=history)
+    response = await asyncio.wait_for(chat.send_message(user_input), timeout=15.0)
+    text = (response.text or "").strip()
+    return {"text": text or None, "search_enabled": use_tools}
+
+
+async def _ask_groq(
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    *,
+    use_tools: bool,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, Any] | None:
     if not runtime.groq_client:
         return None
 
@@ -296,19 +550,22 @@ async def _ask_groq(chat_id: int, model_id: str, user_input: str, system_instruc
     history.append({"role": "user", "content": user_input})
 
     try:
+        request_kwargs: dict[str, Any] = {
+            "model": model_id,
+            "messages": history,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if use_tools:
+            request_kwargs["tools"] = SEARCH_TOOLS
+            request_kwargs["tool_choice"] = "auto"
         response = await asyncio.wait_for(
-            runtime.groq_client.chat.completions.create(
-                model=model_id,
-                messages=history,
-                tools=SEARCH_TOOLS,
-                tool_choice="auto",
-                temperature=0.2,
-                max_tokens=1024,
-            ),
+            runtime.groq_client.chat.completions.create(**request_kwargs),
             timeout=15.0,
         )
         response_message = response.choices[0].message
-        if response_message.tool_calls:
+        used_search = False
+        if use_tools and response_message.tool_calls:
             history.append(
                 {
                     "role": "assistant",
@@ -316,19 +573,19 @@ async def _ask_groq(chat_id: int, model_id: str, user_input: str, system_instruc
                     "tool_calls": _normalize_tool_calls(response_message.tool_calls),
                 }
             )
-            await _apply_search_tools(history, response_message.tool_calls)
+            used_search = await _apply_search_tools(history, response_message.tool_calls)
             response = await asyncio.wait_for(
                 runtime.groq_client.chat.completions.create(
                     model=model_id,
                     messages=history,
-                    temperature=0.2,
-                    max_tokens=1024,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
                 ),
                 timeout=15.0,
             )
             response_message = response.choices[0].message
         text = (response_message.content or "").strip()
-        return text or None
+        return {"text": text or None, "search_enabled": used_search}
     except Exception as error:
         if "tool_use_failed" not in str(error):
             raise
@@ -336,17 +593,26 @@ async def _ask_groq(chat_id: int, model_id: str, user_input: str, system_instruc
             runtime.groq_client.chat.completions.create(
                 model=model_id,
                 messages=history,
-                temperature=0.2,
-                max_tokens=1024,
+                temperature=temperature,
+                max_tokens=max_tokens,
             ),
             timeout=15.0,
         )
         fallback_message = fallback_response.choices[0].message
         text = (fallback_message.content or "").strip()
-        return text or None
+        return {"text": text or None, "search_enabled": False}
 
 
-async def _ask_cloudflare(chat_id: int, model_id: str, user_input: str, system_instruction: str) -> str | None:
+async def _ask_cloudflare(
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    *,
+    use_tools: bool,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, Any] | None:
     if not runtime.cf_accounts or not runtime.cf_tokens:
         return None
 
@@ -369,13 +635,13 @@ async def _ask_cloudflare(chat_id: int, model_id: str, user_input: str, system_i
                 cf_client.chat.completions.create(
                     model=model_id,
                     messages=history,
-                    max_tokens=2048,
-                    temperature=0.2,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
                 ),
                 timeout=60.0,
             )
             text = (response.choices[0].message.content or "").strip()
-            return text or None
+            return {"text": text or None, "search_enabled": False}
         except Exception as error:
             if _is_rate_limit_error(error):
                 rate_limited = True
@@ -389,26 +655,39 @@ async def _ask_cloudflare(chat_id: int, model_id: str, user_input: str, system_i
     return None
 
 
-async def _ask_github(chat_id: int, model_id: str, user_input: str, system_instruction: str) -> str | None:
+async def _ask_github(
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    *,
+    use_tools: bool,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, Any] | None:
     if not runtime.github_client:
         return None
 
     history = _openai_history(chat_id, system_instruction)
     history.append({"role": "user", "content": user_input})
 
+    request_kwargs: dict[str, Any] = {
+        "model": model_id,
+        "messages": history,
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+    }
+    if use_tools:
+        request_kwargs["tools"] = SEARCH_TOOLS
+        request_kwargs["tool_choice"] = "auto"
+
     response = await asyncio.wait_for(
-        runtime.github_client.chat.completions.create(
-            model=model_id,
-            messages=history,
-            tools=SEARCH_TOOLS,
-            tool_choice="auto",
-            max_tokens=1024,
-            temperature=0.2,
-        ),
+        runtime.github_client.chat.completions.create(**request_kwargs),
         timeout=30.0,
     )
     message = response.choices[0].message
-    if message.tool_calls:
+    used_search = False
+    if use_tools and message.tool_calls:
         history.append(
             {
                 "role": "assistant",
@@ -416,23 +695,204 @@ async def _ask_github(chat_id: int, model_id: str, user_input: str, system_instr
                 "tool_calls": _normalize_tool_calls(message.tool_calls),
             }
         )
-        await _apply_search_tools(history, message.tool_calls)
+        used_search = await _apply_search_tools(history, message.tool_calls)
         response = await asyncio.wait_for(
             runtime.github_client.chat.completions.create(
                 model=model_id,
                 messages=history,
-                max_tokens=1024,
-                temperature=0.2,
+                max_tokens=max_tokens,
+                temperature=temperature,
             ),
             timeout=30.0,
         )
         message = response.choices[0].message
     text = (message.content or "").strip()
-    return text or None
+    return {"text": text or None, "search_enabled": used_search}
+
+
+async def _ask_model(
+    provider: str,
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    *,
+    use_tools: bool,
+    temperature: float,
+    max_tokens: int,
+) -> dict[str, Any] | None:
+    if provider == "google":
+        return await _ask_google(
+            chat_id,
+            model_id,
+            user_input,
+            system_instruction,
+            use_tools=use_tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    if provider == "groq":
+        return await _ask_groq(
+            chat_id,
+            model_id,
+            user_input,
+            system_instruction,
+            use_tools=use_tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    if provider == "cloudflare":
+        return await _ask_cloudflare(
+            chat_id,
+            model_id,
+            user_input,
+            system_instruction,
+            use_tools=use_tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    if provider == "github":
+        return await _ask_github(
+            chat_id,
+            model_id,
+            user_input,
+            system_instruction,
+            use_tools=use_tools,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+    return None
+
+
+async def _build_answer_plan(
+    provider: str,
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+) -> str | None:
+    plan_response = await _ask_model(
+        provider,
+        chat_id,
+        model_id,
+        _build_plan_prompt(user_input),
+        system_instruction,
+        use_tools=False,
+        temperature=0.1,
+        max_tokens=220,
+    )
+    if not plan_response:
+        return None
+    plan_text = (plan_response["text"] or "").strip()
+    return plan_text or None
+
+
+async def _critic_and_refine(
+    chat_id: int,
+    user_input: str,
+    draft_answer: str,
+    profile: dict[str, Any],
+    analysis: dict[str, Any],
+    route_mode: str,
+    draft_model: str,
+) -> dict[str, Any] | None:
+    if not runtime.github_client or not runtime.is_provider_available("github"):
+        return None
+
+    critic_prompt = (
+        "Review the draft answer. Return a strict JSON object with keys:\n"
+        'confidence: "high" | "medium" | "low"\n'
+        "needs_refine: boolean\n"
+        "reason: string\n"
+        "improved_answer: string\n"
+        "profile_updates: object\n\n"
+        "Only add profile_updates for stable user preferences explicitly implied by the user's wording.\n"
+        "If the draft is already good, keep improved_answer empty.\n\n"
+        f"Request mode: {route_mode}\n"
+        f"Draft model: {draft_model}\n"
+        f"Needs search: {analysis['needs_search']}\n"
+        f"Known profile: {json.dumps(profile, ensure_ascii=False)}\n\n"
+        f"User request:\n{user_input}\n\n"
+        f"Draft answer:\n{draft_answer}"
+    )
+
+    try:
+        critic_response = await _ask_github(
+            chat_id,
+            "gpt-4o",
+            critic_prompt,
+            "You are a concise response critic. Output strict JSON only.",
+            use_tools=False,
+            temperature=0.1,
+            max_tokens=900,
+        )
+    except Exception as error:
+        rate_limited = _is_rate_limit_error(error)
+        cooldown = runtime.mark_provider_failure("github", rate_limited=rate_limited)
+        _log_provider_cooldown("github", cooldown, "critic failure")
+        return None
+
+    if not critic_response or not critic_response.get("text"):
+        return None
+
+    payload = _extract_json_object(critic_response["text"])
+    if not payload:
+        return None
+
+    runtime.mark_provider_success("github")
+    profile_updates = _sanitize_profile_updates(payload.get("profile_updates"))
+    if profile_updates:
+        state.update_user_profile(chat_id, profile_updates)
+
+    confidence = str(payload.get("confidence", "medium")).lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = "medium"
+
+    improved_answer = str(payload.get("improved_answer", "")).strip()
+    return {
+        "confidence": confidence,
+        "needs_refine": bool(payload.get("needs_refine")),
+        "reason": str(payload.get("reason", "")).strip(),
+        "improved_answer": improved_answer,
+        "profile_updates": profile_updates,
+    }
+
+
+def _build_response_mode_label(
+    mode: str,
+    manually_selected: bool,
+    analysis: dict[str, Any],
+    used_model: str,
+    confidence: str,
+    *,
+    plan_used: bool,
+    critic_used: bool,
+    search_enabled: bool,
+) -> str:
+    parts: list[str] = []
+    parts.append("manual" if manually_selected else "auto")
+    if mode == MODE_SERIOUS:
+        if analysis["needs_search"]:
+            parts.append("search-gated")
+        if analysis["is_complex"]:
+            parts.append("complex")
+    if plan_used:
+        parts.append("plan")
+    if critic_used:
+        parts.append("critic")
+        parts.append("self-refine")
+    if search_enabled:
+        parts.append("search")
+    parts.append(f"conf:{confidence}")
+    parts.append(used_model)
+    return " | ".join(parts)
 
 
 async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[str, str] | None:
-    priority, requested_name = _build_priority(chat_id, user_input, mode)
+    profile_updates = _extract_profile_updates(chat_id, user_input)
+    profile = state.update_user_profile(chat_id, profile_updates) if profile_updates else state.get_user_profile(chat_id)
+    analysis = _analyze_request(user_input, mode, profile)
+    priority, requested_name, manually_selected = _build_priority(chat_id, user_input, mode, analysis)
 
     for model_info in priority:
         provider = model_info["provider"]
@@ -447,33 +907,90 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
             )
             continue
 
-        system_instruction = _build_system_instruction(chat_id, mode, model_id)
+        system_instruction = _build_system_instruction(chat_id, mode, model_id, profile, analysis)
+        max_tokens = 1400 if analysis["is_complex"] else 900
+        temperature = 0.2 if mode == MODE_SERIOUS else 0.5
+        plan_text: str | None = None
+        plan_used = False
 
         try:
-            text = None
-            if provider == "google":
-                text = await _ask_google(chat_id, model_id, user_input, system_instruction)
-            elif provider == "groq":
-                text = await _ask_groq(chat_id, model_id, user_input, system_instruction)
-            elif provider == "cloudflare":
-                text = await _ask_cloudflare(chat_id, model_id, user_input, system_instruction)
-            elif provider == "github":
-                text = await _ask_github(chat_id, model_id, user_input, system_instruction)
+            if analysis["needs_plan"]:
+                try:
+                    plan_text = await _build_answer_plan(provider, chat_id, model_id, user_input, system_instruction)
+                except Exception as error:
+                    logger.info("Planning step skipped for %s: %s", model_id, str(error)[:100])
+                if plan_text:
+                    plan_used = True
 
-            if not text:
+            response = await _ask_model(
+                provider,
+                chat_id,
+                model_id,
+                _merge_user_prompt(user_input, plan_text),
+                system_instruction,
+                use_tools=analysis["needs_search"],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+            if not response or not response.get("text"):
                 continue
+
+            text = str(response["text"]).strip()
+            search_enabled = bool(response.get("search_enabled"))
             if _looks_garbled_text(text):
                 cooldown = runtime.mark_provider_failure(provider)
                 logger.warning("Discarding garbled response from %s", model_id)
                 _log_provider_cooldown(provider, cooldown, "garbled output")
                 continue
 
+            confidence = _estimate_confidence(user_input, text, analysis, search_enabled)
+            if confidence == "low" and provider != "github" and not manually_selected:
+                logger.info("Escalating from %s due to low draft confidence", model_id)
+                continue
+
+            final_text = text
+            critic_used = False
+            final_model = model_id
+            critic_result: dict[str, Any] | None = None
+
+            if analysis["needs_critic"]:
+                critic_result = await _critic_and_refine(
+                    chat_id,
+                    user_input,
+                    final_text,
+                    profile,
+                    analysis,
+                    "manual" if manually_selected else "auto",
+                    model_id,
+                )
+                if critic_result:
+                    confidence = critic_result["confidence"]
+                    improved_answer = critic_result["improved_answer"]
+                    if improved_answer:
+                        final_text = improved_answer
+                        critic_used = True
+                        final_model = f"{model_id} -> gpt-4o critic"
+
             runtime.mark_provider_success(provider)
+            response_mode = _build_response_mode_label(
+                mode,
+                manually_selected,
+                analysis,
+                final_model,
+                confidence,
+                plan_used=plan_used,
+                critic_used=critic_used,
+                search_enabled=search_enabled,
+            )
+
             return {
-                "text": text,
-                "used_model": model_id,
-                "save_text": text,
+                "text": final_text,
+                "used_model": final_model,
+                "save_text": final_text,
                 "requested_name": requested_name or "",
+                "response_mode": response_mode,
+                "confidence": confidence,
             }
         except asyncio.TimeoutError:
             cooldown = runtime.mark_provider_failure(provider)
