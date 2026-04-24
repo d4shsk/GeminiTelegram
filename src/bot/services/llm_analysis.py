@@ -7,18 +7,19 @@ from ..runtime import logger
 from ..state import state
 from ..utils import moscow_datetime
 
-MIXED_SCRIPT_RE = re.compile(r"\b(?=\w*[A-Za-zГЂ-Гї])(?=\w*[Рђ-РЇР°-СЏРЃС‘])[A-Za-zГЂ-ГїРђ-РЇР°-СЏРЃС‘]+\b")
+MIXED_SCRIPT_RE = re.compile(r"\b(?=\w*[A-Za-z])(?=\w*[\u0400-\u04FF])[A-Za-z\u0400-\u04FF]+\b")
+CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
 SUSPICIOUS_GARBLED_CHARS = {"Гѓ", "Гђ", "Г‘", "Г•", "Гµ", "ГЈ", "ДЌ", "ЕЎ", "Еѕ", "пїЅ"}
 COMPLEX_REQUEST_KEYWORDS = (
-    "СЂР°Р·Р±РµСЂРё",
-    "Р°СЂС…РёС‚РµРєС‚СѓСЂ",
-    "РїРѕС€Р°РіРѕРІРѕ",
-    "РїРѕРґСЂРѕР±РЅРѕ",
-    "СЃСЂР°РІРЅРё",
-    "СЃСЂР°РІРЅРµРЅРёРµ",
-    "РѕР±РѕСЃРЅСѓР№",
-    "РґРѕРєР°Р¶Рё",
-    "РїСЂРѕР°РЅР°Р»РёР·",
+    "разбери",
+    "архитектур",
+    "пошагово",
+    "подробно",
+    "сравни",
+    "сравнение",
+    "обоснуй",
+    "докажи",
+    "проанализ",
     "analysis",
     "analyze",
     "compare",
@@ -29,21 +30,20 @@ COMPLEX_REQUEST_KEYWORDS = (
     "bug",
     "review",
     "code review",
-    "РѕРїС‚РёРјРёР·",
-    "Р°Р»РіРѕСЂРёС‚Рј",
-    "Р°Р»РіРѕСЂРёС‚РјР°",
+    "оптимиз",
+    "алгоритм",
 )
 SEARCH_REQUEST_KEYWORDS = (
-    "СЃРµРіРѕРґРЅСЏ",
-    "СЃРµР№С‡Р°СЃ",
-    "РїРѕСЃР»РµРґРЅ",
-    "РЅРѕРІРѕСЃС‚",
-    "Р°РєС‚СѓР°Р»СЊ",
-    "РєСѓСЂСЃ",
-    "С†РµРЅР°",
-    "С†РµРЅС‹",
-    "РїРѕРіРѕРґР°",
-    "СЂР°СЃРїРёСЃР°РЅ",
+    "сегодня",
+    "сейчас",
+    "последн",
+    "новост",
+    "актуаль",
+    "курс",
+    "цена",
+    "цены",
+    "погода",
+    "расписан",
     "score",
     "latest",
     "recent",
@@ -55,35 +55,35 @@ SEARCH_REQUEST_KEYWORDS = (
     "release",
 )
 LOW_CONFIDENCE_MARKERS = (
-    "РІРѕР·РјРѕР¶РЅРѕ",
-    "РєР°Р¶РµС‚СЃСЏ",
-    "РЅРµ СѓРІРµСЂРµРЅ",
-    "РјРѕРіСѓ РѕС€РёР±Р°С‚СЊСЃСЏ",
-    "СЃРєРѕСЂРµРµ РІСЃРµРіРѕ",
-    "РЅРµ РјРѕРіСѓ РїСЂРѕРІРµСЂРёС‚СЊ",
+    "возможно",
+    "кажется",
+    "не уверен",
+    "могу ошибаться",
+    "скорее всего",
+    "не могу проверить",
     "maybe",
     "probably",
     "not sure",
     "i might be wrong",
 )
 TOPIC_KEYWORDS = {
-    "coding": ("РєРѕРґ", "python", "api", "debug", "bug", "refactor", "programming"),
-    "telegram": ("telegram", "Р±РѕС‚", "bot", "aiogram"),
-    "llm": ("llm", "model", "РјРѕРґРµР»СЊ", "prompt", "gemini", "gpt", "groq", "kimi"),
+    "coding": ("код", "python", "api", "debug", "bug", "refactor", "programming"),
+    "telegram": ("telegram", "бот", "bot", "aiogram"),
+    "llm": ("llm", "model", "модель", "prompt", "gemini", "gpt", "groq", "kimi"),
     "infra": ("railway", "docker", "deploy", "sqlite", "postgres", "redis", "server"),
 }
 STRONG_REASONING_MODELS = {"gemini-2.5-flash", "@cf/moonshotai/kimi-k2.6"}
 PRACTICAL_REASONING_KEYWORDS = (
-    "Р»СѓС‡С€Рµ",
-    "СЃС‚РѕРёС‚ Р»Рё",
-    "С‡С‚Рѕ РІС‹Р±СЂР°С‚СЊ",
-    "РєР°Рє РїРѕСЃС‚СѓРїРёС‚СЊ",
-    "С‡С‚Рѕ РґРµР»Р°С‚СЊ",
-    "РїРѕР№С‚Рё РёР»Рё",
-    "РїРѕРµС…Р°С‚СЊ РёР»Рё",
-    "РёРґС‚Рё РёР»Рё",
-    "Р±СЂР°С‚СЊ РёР»Рё",
-    "РЅСѓР¶РЅРѕ Р»Рё",
+    "лучше",
+    "стоит ли",
+    "что выбрать",
+    "как поступить",
+    "что делать",
+    "пойти или",
+    "поехать или",
+    "идти или",
+    "брать или",
+    "нужно ли",
     "do i",
     "should i",
     "which is better",
@@ -99,11 +99,11 @@ def _resolve_worker_priority(chat_id: int, user_input: str) -> tuple[list[dict[s
     requested_name = None
     text_lower = user_input.lower()
 
-    if "РіРµРјРј" in text_lower or "gemma" in text_lower:
+    if "гемм" in text_lower or "gemma" in text_lower:
         state.active_models[chat_id] = "gemma"
-    elif "Р»Р°Рј" in text_lower or "llam" in text_lower:
+    elif "лам" in text_lower or "llam" in text_lower:
         state.active_models[chat_id] = "llama"
-    elif "РіРµРјРёРЅ" in text_lower or "gemin" in text_lower:
+    elif "гемин" in text_lower or "gemin" in text_lower:
         state.active_models[chat_id] = "gemini"
 
     selected = state.active_models.get(chat_id)
@@ -156,7 +156,6 @@ def _is_complex_request(user_input: str) -> bool:
 
     keyword_hits = sum(1 for keyword in COMPLEX_REQUEST_KEYWORDS if keyword in lower_text)
     score += min(keyword_hits, 3)
-
     return score >= 3
 
 
@@ -177,42 +176,42 @@ def extract_profile_updates(chat_id: int, user_input: str) -> dict[str, Any]:
     lower_text = text.lower()
     updates: dict[str, Any] = {}
 
-    if re.search(r"РЅР° СЂСѓСЃСЃРєРѕРј|РїРѕ-СЂСѓСЃСЃРєРё|in russian", lower_text):
+    if re.search(r"на русском|по-русски|in russian", lower_text):
         updates["language"] = "ru"
-    elif re.search(r"РЅР° Р°РЅРіР»РёР№СЃРєРѕРј|in english", lower_text):
+    elif re.search(r"на английском|in english", lower_text):
         updates["language"] = "en"
     else:
-        cyr = len(re.findall(r"[Рђ-РЇР°-СЏРЃС‘]", text))
+        cyr = len(re.findall(r"[\u0400-\u04FF]", text))
         lat = len(re.findall(r"[A-Za-z]", text))
         if cyr > lat * 2 and cyr >= 8:
             updates["language"] = "ru"
         elif lat > cyr * 2 and lat >= 8:
             updates["language"] = "en"
 
-    if re.search(r"РєРѕСЂРѕС‚РєРѕ|РєСЂР°С‚РєРѕ|briefly|concise|Р±РµР· РІРѕРґС‹", lower_text):
+    if re.search(r"коротко|кратко|briefly|concise|без воды", lower_text):
         updates["verbosity"] = "short"
-    elif re.search(r"РїРѕРґСЂРѕР±РЅРѕ|РґРµС‚Р°Р»СЊРЅРѕ|СЂР°Р·РІРµСЂРЅСѓС‚Рѕ|in detail|thorough", lower_text):
+    elif re.search(r"подробно|детально|развернуто|in detail|thorough", lower_text):
         updates["verbosity"] = "detailed"
 
-    if re.search(r"РїРѕ РїСѓРЅРєС‚Р°Рј|СЃРїРёСЃРєРѕРј|bullet", lower_text):
+    if re.search(r"по пунктам|списком|bullet", lower_text):
         updates["format"] = "bullets"
-    elif re.search(r"РѕР±С‹С‡РЅС‹Рј С‚РµРєСЃС‚РѕРј|СЃРїР»РѕС€РЅС‹Рј С‚РµРєСЃС‚РѕРј|plain prose", lower_text):
+    elif re.search(r"обычным текстом|сплошным текстом|plain prose", lower_text):
         updates["format"] = "prose"
 
-    if re.search(r"СЃРЅР°С‡Р°Р»Р° РІС‹РІРѕРґ|РёС‚РѕРі СЃРЅР°С‡Р°Р»Р°|bottom line first|summary first", lower_text):
+    if re.search(r"сначала вывод|итог сначала|bottom line first|summary first", lower_text):
         updates["structure"] = "summary_first"
 
-    if re.search(r"Р±РµР· С‚Р°Р±Р»РёС†|no tables", lower_text):
+    if re.search(r"без таблиц|no tables", lower_text):
         updates["tables"] = "avoid"
-    elif re.search(r"СЃ С‚Р°Р±Р»РёС†|С‚Р°Р±Р»РёС†|table", lower_text):
+    elif re.search(r"с таблиц|таблиц|table", lower_text):
         updates["tables"] = "allow"
 
-    if re.search(r"СЃ РїСЂРёРјРµСЂР°РјРё|examples", lower_text):
+    if re.search(r"с примерами|examples", lower_text):
         updates["examples"] = "prefer"
-    elif re.search(r"Р±РµР· РїСЂРёРјРµСЂРѕРІ|no examples", lower_text):
+    elif re.search(r"без примеров|no examples", lower_text):
         updates["examples"] = "avoid"
 
-    if re.search(r"Р±РµР· РІРѕРґС‹|РїРѕ РґРµР»Сѓ|direct", lower_text):
+    if re.search(r"без воды|по делу|direct", lower_text):
         updates["tone"] = "direct"
 
     topics = list(profile.get("topics", []))
@@ -281,22 +280,19 @@ def needs_goal_guard(user_input: str) -> bool:
     text = user_input.strip().lower()
     if not text:
         return False
-
     if re.search(r"\b\d+\s*[+\-*/]\s*\d+\b", text):
         return False
-
     if len(text) < 20:
         return False
 
     keyword_match = any(keyword in text for keyword in PRACTICAL_REASONING_KEYWORDS)
-    choice_pattern = bool(re.search(r"\bРёР»Рё\b", text) or re.search(r"\bor\b", text))
+    choice_pattern = bool(re.search(r"\bили\b", text) or re.search(r"\bor\b", text))
     action_pattern = bool(
         re.search(
-            r"РїРѕР№С‚Рё|РїРѕРµС…Р°С‚СЊ|РёРґС‚Рё|РµС…Р°С‚СЊ|РІР·СЏС‚СЊ|РѕСЃС‚Р°РІРёС‚СЊ|РєСѓРїРёС‚СЊ|РїСЂРѕРґР°С‚СЊ|РЅРµСЃС‚Рё|РІРµР·С‚Рё|РґРѕР№С‚Рё|walk|drive|go|take|leave",
+            r"пойти|поехать|идти|ехать|взять|оставить|купить|продать|нести|везти|дойти|walk|drive|go|take|leave",
             text,
         )
     )
-
     return keyword_match or (choice_pattern and action_pattern)
 
 
@@ -371,7 +367,7 @@ def build_system_instruction(
     if profile_prompt:
         extras.append(profile_prompt)
     if summary:
-        extras.append("Earlier conversation summary:\n" f"{summary}")
+        extras.append(f"Earlier conversation summary:\n{summary}")
     if analysis["needs_search"]:
         extras.append("If the answer may depend on recent or changing facts, verify before answering rather than guessing.")
 
@@ -381,7 +377,7 @@ def build_system_instruction(
 
 
 def looks_garbled_text(text: str) -> bool:
-    if not text or not re.search(r"[Рђ-РЇР°-СЏРЃС‘]", text):
+    if not text or not CYRILLIC_RE.search(text):
         return False
     if MIXED_SCRIPT_RE.search(text):
         return True
@@ -394,17 +390,17 @@ def looks_incomplete_answer(text: str) -> bool:
     if not stripped:
         return False
 
-    if stripped.endswith((":", "(", "[", "{", "-", "вЂ”")):
+    if stripped.endswith((":", "(", "[", "{", "-", "—")):
         return True
 
     last_line = stripped.splitlines()[-1].strip()
     if not last_line:
         return False
 
-    if re.match(r"^[вЂўв¦Ѓ*-]\s+\S+", last_line) and not re.search(r"[.!?вЂ¦В»\])\"]$", last_line):
+    if re.match(r"^[•▪*-]\s+\S+", last_line) and not re.search(r"[.!?…»\])\"]$", last_line):
         return True
 
-    if len(last_line) <= 18 and not re.search(r"[.!?вЂ¦В»\])\"]$", last_line):
+    if len(last_line) <= 18 and not re.search(r"[.!?…»\])\"]$", last_line):
         return True
 
     return False
@@ -456,12 +452,12 @@ def build_response_mode_label(
     checker_model: str = "",
     self_check: bool = False,
 ) -> str:
-    route_mode = "РІСЂСѓС‡РЅСѓСЋ" if manually_selected else "Р°РІС‚Рѕ"
-    answer_type = "Р±С‹СЃС‚СЂС‹Р№ РѕС‚РІРµС‚"
+    route_mode = "вручную" if manually_selected else "авто"
+    answer_type = "быстрый ответ"
     if search_enabled:
-        answer_type = "СЃ РїРѕРёСЃРєРѕРј"
+        answer_type = "с поиском"
     elif critic_used:
-        answer_type = "СЃР°РјРѕРїСЂРѕРІРµСЂРєР°" if self_check else f"РїСЂРѕРІРµСЂРµРЅРѕ: {checker_model}"
+        answer_type = "самопроверка" if self_check else f"проверено: {checker_model}"
 
     return json.dumps(
         {
@@ -470,6 +466,9 @@ def build_response_mode_label(
             "model": used_model,
             "checker_model": checker_model,
             "self_check": self_check,
+            "confidence": confidence,
+            "plan_used": plan_used,
+            "needs_critic": analysis.get("needs_critic", False),
         },
         ensure_ascii=False,
     )
