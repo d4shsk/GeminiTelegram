@@ -1,7 +1,7 @@
 import telegramify_markdown
 
 
-TELEGRAM_SPACER_LINE = "\u2063"
+TABLE_CARD_SEPARATOR = "━━━━━━━━━━━━"
 
 
 def format_for_telegram(text: str) -> str:
@@ -114,7 +114,7 @@ def _table_to_mobile_cards(table_lines: list[str]) -> list[str]:
         title_header = headers[0] or "Пункт"
 
         if cards:
-            cards.extend(["", TELEGRAM_SPACER_LINE, ""])
+            cards.extend([TABLE_CARD_SEPARATOR, ""])
 
         cards.append(f"**{title_header}: {title}**")
         for header, value in zip(headers[1:], normalized_row[1:]):
