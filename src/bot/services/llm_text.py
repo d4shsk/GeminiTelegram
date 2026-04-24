@@ -84,6 +84,7 @@ TOPIC_KEYWORDS = {
     "llm": ("llm", "model", "модель", "prompt", "gemini", "gpt", "groq", "kimi"),
     "infra": ("railway", "docker", "deploy", "sqlite", "postgres", "redis", "server"),
 }
+STRONG_REASONING_MODELS = {"gemini-2.5-flash", "@cf/moonshotai/kimi-k2.6"}
 
 
 def _resolve_worker_priority(chat_id: int, user_input: str) -> tuple[list[dict[str, Any]], str | None, bool]:
@@ -261,6 +262,10 @@ def _analyze_request(user_input: str, mode: str, profile: dict[str, Any]) -> dic
         "prefer_strong_model": mode == MODE_SERIOUS and (is_complex or needs_search),
         "profile_hint": profile.get("verbosity", ""),
     }
+
+
+def _is_weak_reasoning_model(model_id: str) -> bool:
+    return model_id not in STRONG_REASONING_MODELS
 
 
 def _resolve_serious_priority(
@@ -516,6 +521,18 @@ def _sanitize_profile_updates(raw_updates: Any) -> dict[str, Any]:
         elif isinstance(value, (str, int, float, bool)):
             sanitized[key] = value
     return sanitized
+
+
+def _build_goal_prompt(user_input: str) -> str:
+    return (
+        "Extract the practical goal behind the user's request. Return strict JSON with keys:\n"
+        "goal: string\n"
+        "required_objects: array of strings\n"
+        "must_remain_true: array of strings\n"
+        "invalid_outcomes: array of strings\n\n"
+        "Focus on what must still be possible after following the advice.\n\n"
+        f"User request:\n{user_input}"
+    )
 
 
 async def _ask_google(
@@ -810,6 +827,45 @@ async def _build_answer_plan(
     return plan_text or None
 
 
+async def _extract_goal_contract(
+    provider: str,
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+) -> dict[str, Any] | None:
+    response = await _ask_model(
+        provider,
+        chat_id,
+        model_id,
+        _build_goal_prompt(user_input),
+        system_instruction,
+        use_tools=False,
+        temperature=0.1,
+        max_tokens=260,
+    )
+    if not response or not response.get("text"):
+        return None
+    payload = _extract_json_object(str(response["text"]))
+    if not isinstance(payload, dict):
+        return None
+
+    goal = str(payload.get("goal", "")).strip()
+    required_objects = payload.get("required_objects", [])
+    must_remain_true = payload.get("must_remain_true", [])
+    invalid_outcomes = payload.get("invalid_outcomes", [])
+
+    contract = {
+        "goal": goal,
+        "required_objects": [str(item).strip() for item in required_objects if str(item).strip()][:5],
+        "must_remain_true": [str(item).strip() for item in must_remain_true if str(item).strip()][:5],
+        "invalid_outcomes": [str(item).strip() for item in invalid_outcomes if str(item).strip()][:5],
+    }
+    if not contract["goal"]:
+        return None
+    return contract
+
+
 async def _continue_incomplete_answer(
     provider: str,
     chat_id: int,
@@ -841,6 +897,51 @@ async def _continue_incomplete_answer(
         return None
     joiner = "" if partial_answer.endswith(("\n", " ")) else " "
     return partial_answer + joiner + extra
+
+
+async def _apply_goal_guard(
+    provider: str,
+    chat_id: int,
+    model_id: str,
+    user_input: str,
+    system_instruction: str,
+    draft_answer: str,
+    goal_contract: dict[str, Any],
+) -> dict[str, Any] | None:
+    guard_prompt = (
+        "Check whether the draft answer preserves the user's real-world goal. "
+        "Return strict JSON with keys:\n"
+        "is_consistent: boolean\n"
+        "problem: string\n"
+        "rewritten_answer: string\n\n"
+        "If the draft is already goal-consistent, keep rewritten_answer empty.\n\n"
+        f"Goal contract:\n{json.dumps(goal_contract, ensure_ascii=False)}\n\n"
+        f"User request:\n{user_input}\n\n"
+        f"Draft answer:\n{draft_answer}"
+    )
+    response = await _ask_model(
+        provider,
+        chat_id,
+        model_id,
+        guard_prompt,
+        system_instruction,
+        use_tools=False,
+        temperature=0.1,
+        max_tokens=700,
+    )
+    if not response or not response.get("text"):
+        return None
+
+    payload = _extract_json_object(str(response["text"]))
+    if not isinstance(payload, dict):
+        return None
+
+    rewritten_answer = str(payload.get("rewritten_answer", "")).strip()
+    return {
+        "is_consistent": bool(payload.get("is_consistent")),
+        "problem": str(payload.get("problem", "")).strip(),
+        "rewritten_answer": rewritten_answer,
+    }
 
 
 async def _critic_and_refine(
@@ -966,6 +1067,7 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
         temperature = 0.2 if mode == MODE_SERIOUS else 0.5
         plan_text: str | None = None
         plan_used = False
+        goal_contract: dict[str, Any] | None = None
 
         try:
             if analysis["needs_plan"]:
@@ -975,6 +1077,18 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                     logger.info("Planning step skipped for %s: %s", model_id, str(error)[:100])
                 if plan_text:
                     plan_used = True
+
+            if mode == MODE_SERIOUS and _is_weak_reasoning_model(model_id):
+                try:
+                    goal_contract = await _extract_goal_contract(
+                        provider,
+                        chat_id,
+                        model_id,
+                        user_input,
+                        system_instruction,
+                    )
+                except Exception as error:
+                    logger.info("Goal extraction skipped for %s: %s", model_id, str(error)[:100])
 
             response = await _ask_model(
                 provider,
@@ -1009,6 +1123,29 @@ async def generate_text_reply(chat_id: int, user_input: str, mode: str) -> dict[
                 )
                 if continued_text and not _looks_garbled_text(continued_text):
                     text = continued_text
+
+            if goal_contract:
+                try:
+                    goal_guard = await _apply_goal_guard(
+                        provider,
+                        chat_id,
+                        model_id,
+                        user_input,
+                        system_instruction,
+                        text,
+                        goal_contract,
+                    )
+                except Exception as error:
+                    logger.info("Goal guard skipped for %s: %s", model_id, str(error)[:100])
+                    goal_guard = None
+                if goal_guard and not goal_guard["is_consistent"]:
+                    rewritten_answer = goal_guard["rewritten_answer"]
+                    if rewritten_answer and not _looks_garbled_text(rewritten_answer):
+                        logger.info("Rewriting goal-inconsistent answer from %s", model_id)
+                        text = rewritten_answer
+                    else:
+                        logger.info("Escalating from %s due to goal inconsistency", model_id)
+                        continue
 
             confidence = _estimate_confidence(user_input, text, analysis, search_enabled)
             if confidence == "low" and provider != "github" and not manually_selected:
