@@ -5,6 +5,7 @@ test_gpt.py
 
 # Python
 __pycache__/
+.serena/
 *.py[cod]
 *.pyo
 *.sqlite3
